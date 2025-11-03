@@ -1,0 +1,45 @@
+/* src/mobile/styles.css */
+/* Scope all rules under .m-app to avoid collisions */
+.m-app { --bg:#0b0b0b; --fg:#eaeaea; --muted:#9aa1a9; --acc:#7c5cff; }
+.m-app { background:var(--bg); color:var(--fg); min-height:100svh; }
+
+@supports (height: 100svh) {
+  .m-app { min-height: 100svh; }
+}
+
+.m-topbar { 
+  height:56px; 
+  display:flex; 
+  align-items:center; 
+  justify-content:space-between; 
+  padding-left: max(12px, env(safe-area-inset-left)); 
+  padding-right: max(12px, env(safe-area-inset-right)); 
+  padding-top: max(0px, env(safe-area-inset-top)); 
+  border-bottom:1px solid #1f1f1f; 
+}
+.m-title { font-size:16px; font-weight:600; }
+.m-scroll { position:fixed; inset:56px 0 64px 0; overflow:auto; padding:12px; }
+
+.m-msg { margin:8px 0; max-width:88%; line-height:1.35; }
+.m-me { margin-left:auto; background:#1c1c1c; padding:10px 12px; border-radius:14px 14px 4px 14px; }
+.m-ai { margin-right:auto; background:#101010; padding:10px 12px; border-radius:14px 14px 14px 4px; }
+
+.m-composer { 
+  position:fixed; 
+  left:0; 
+  right:0; 
+  bottom:0; 
+  height:64px; 
+  display:flex; 
+  gap:8px; 
+  align-items:center; 
+  padding-left: max(8px, env(safe-area-inset-left)); 
+  padding-right: max(8px, env(safe-area-inset-right)); 
+  padding-bottom: max(8px, env(safe-area-inset-bottom)); 
+  background:rgba(0,0,0,0.6); 
+  backdrop-filter: blur(8px); 
+  border-top:1px solid #1f1f1f; 
+}
+.m-input { flex:1; height:44px; padding:10px 12px; background:#0f0f0f; border:1px solid #1f1f1f; border-radius:12px; color:var(--fg); }
+.m-send { width:44px; height:44px; display:grid; place-items:center; border-radius:12px; background:var(--acc); color:white; }
+

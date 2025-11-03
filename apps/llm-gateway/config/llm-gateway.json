@@ -1,0 +1,33 @@
+{
+  "flags": {
+    "fr": true,
+    "rag": false,
+    "hybridRAG": true,
+    "editor": false,
+    "search": true,
+    "memoryEvents": true
+  },
+  "timeouts": {
+    "softMs": 8000,
+    "hardMs": 15000,
+    "ttfbSoftMs": 800
+  },
+  "models": {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-3-haiku-20240307",
+    "google": "gemini-2.0-flash-exp"
+  },
+  "router": {
+    "frMaxTokens": 120,
+    "frTimeoutMs": 400,
+    "keepLastTurns": 10,
+    "maxInputTokens": 16000,
+    "maxOutputTokens": 16384,
+    "maxOutputTokensPerProvider": {
+      "openai": 16384,
+      "anthropic": 4096,
+      "google": 8192
+    }
+  }
+}
+

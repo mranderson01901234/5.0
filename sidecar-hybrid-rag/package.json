@@ -1,0 +1,33 @@
+{
+  "name": "@llm-gateway/hybrid-rag",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Hybrid Agentic RAG Sidecar - Combining Memory, Web, Vector, and Graph RAG",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "test": "vitest"
+  },
+  "dependencies": {
+    "fastify": "^4.24.3",
+    "@fastify/cors": "^8.4.0",
+    "@qdrant/js-client-rest": "^1.9.0",
+    "@qdrant/qdrant-js": "^1.13.1",
+    "openai": "^4.20.0",
+    "ioredis": "^5.3.2",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.10.0",
+    "pino": "^8.17.2",
+    "pino-pretty": "^11.0.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.0.4",
+    "@vitest/coverage-v8": "^1.0.4"
+  }
+}

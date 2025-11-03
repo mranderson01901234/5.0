@@ -1,0 +1,752 @@
+Excellent! Now that you have your models configured, let's focus on building a robust, efficient pipeline. Here's your next optimization roadmap:
+
+## Phase 1: Pipeline Architecture & Monitoring
+
+### 1. Request Pipeline Orchestrator
+
+```bash
+# Create a centralized pipeline manager
+touch src/lib/pipeline-orchestrator.js
+nano src/lib/pipeline-orchestrator.js
+```
+
+```javascript
+export class PipelineOrchestrator {
+  constructor() {
+    this.stages = {
+      'preprocessing': this.preprocessRequest,
+      'context-gathering': this.gatherContext,
+      'model-routing': this.routeToModel,
+      'response-processing': this.processResponse,
+      'caching': this.handleCaching,
+      'logging': this.logMetrics
+    };
+    
+    this.metrics = {
+      requestCount: 0,
+      averageLatency: 0,
+      cacheHitRate: 0,
+      modelUsage: {},
+      errors: []
+    };
+  }
+
+  async executeRequest(request) {
+    const startTime = Date.now();
+    const requestId = this.generateRequestId();
+    
+    try {
+      // Stage 1: Preprocessing
+      const preprocessed = await this.preprocessRequest(request, requestId);
+      
+      // Stage 2: Context Gathering (Parallel)
+      const contextPromises = await Promise.allSettled([
+        this.gatherRAGContext(preprocessed),
+        this.gatherWebContext(preprocessed),
+        this.gatherMemoryContext(preprocessed)
+      ]);
+      
+      const context = this.mergeContextResults(contextPromises);
+      
+      // Stage 3: Model Selection & Routing
+      const modelDecision = await this.routeToModel(preprocessed, context);
+      
+      // Stage 4: Execute Model Call
+      const response = await this.executeModelCall(modelDecision);
+      
+      // Stage 5: Post-processing
+      const finalResponse = await this.processResponse(response, context);
+      
+      // Stage 6: Caching & Metrics
+      await Promise.all([
+        this.handleCaching(request, finalResponse),
+        this.logMetrics(requestId, Date.now() - startTime, modelDecision.model)
+      ]);
+      
+      return {
+        ...finalResponse,
+        metadata: {
+          requestId,
+          latency: Date.now() - startTime,
+          model: modelDecision.model,
+          contextSources: context.sources,
+          cacheHit: context.cacheHit || false
+        }
+      };
+      
+    } catch (error) {
+      await this.handleError(error, requestId, startTime);
+      throw error;
+    }
+  }
+
+  async preprocessRequest(request, requestId) {
+    // Input validation and sanitization
+    const sanitized = {
+      message: this.sanitizeInput(request.message),
+      conversationId: request.conversationId || this.generateConversationId(),
+      userId: request.userId,
+      preferences: request.preferences || {},
+      priority: this.calculatePriority(request),
+      requestId
+    };
+    
+    // Check rate limits
+    await this.checkRateLimit(sanitized.userId);
+    
+    return sanitized;
+  }
+
+  async gatherContext(preprocessed) {
+    const contextStartTime = Date.now();
+    
+    // Parallel context gathering with timeouts
+    const [ragResult, webResult, memoryResult] = await Promise.allSettled([
+      this.withTimeout(this.gatherRAGContext(preprocessed), 2000),
+      this.withTimeout(this.gatherWebContext(preprocessed), 3000),
+      this.withTimeout(this.gatherMemoryContext(preprocessed), 1000)
+    ]);
+    
+    return {
+      rag: ragResult.status === 'fulfilled' ? ragResult.value : [],
+      web: webResult.status === 'fulfilled' ? webResult.value : [],
+      memory: memoryResult.status === 'fulfilled' ? memoryResult.value : [],
+      gatheringTime: Date.now() - contextStartTime,
+      sources: this.identifyContextSources([ragResult, webResult, memoryResult])
+    };
+  }
+
+  withTimeout(promise, ms) {
+    return Promise.race([
+      promise,
+      new Promise((_, reject) => 
+        setTimeout(() => reject(new Error('Timeout')), ms)
+      )
+    ]);
+  }
+}
+```
+
+### 2. Performance Monitoring System
+
+```bash
+# Create monitoring infrastructure
+touch src/lib/performance-monitor.js
+nano src/lib/performance-monitor.js
+```
+
+```javascript
+export class PerformanceMonitor {
+  constructor() {
+    this.metrics = {
+      requests: [],
+      modelPerformance: {},
+      contextSources: {},
+      errors: [],
+      systemHealth: {}
+    };
+    
+    this.alerts = {
+      highLatency: 5000, // 5 seconds
+      lowCacheHit: 0.3,  // 30%
+      errorRate: 0.05    // 5%
+    };
+  }
+
+  async recordRequest(requestData) {
+    const record = {
+      timestamp: Date.now(),
+      requestId: requestData.requestId,
+      latency: requestData.latency,
+      model: requestData.model,
+      contextSize: requestData.contextSize,
+      responseSize: requestData.responseSize,
+      cacheHit: requestData.cacheHit,
+      userId: requestData.userId
+    };
+    
+    this.metrics.requests.push(record);
+    
+    // Sliding window - keep last 1000 requests
+    if (this.metrics.requests.length > 1000) {
+      this.metrics.requests = this.metrics.requests.slice(-1000);
+    }
+    
+    // Update model performance metrics
+    this.updateModelMetrics(record);
+    
+    // Check for alerts
+    await this.checkAlerts(record);
+  }
+
+  updateModelMetrics(record) {
+    const model = record.model;
+    if (!this.metrics.modelPerformance[model]) {
+      this.metrics.modelPerformance[model] = {
+        requests: 0,
+        totalLatency: 0,
+        errors: 0,
+        cacheHits: 0
+      };
+    }
+    
+    const modelMetrics = this.metrics.modelPerformance[model];
+    modelMetrics.requests++;
+    modelMetrics.totalLatency += record.latency;
+    if (record.cacheHit) modelMetrics.cacheHits++;
+  }
+
+  getPerformanceReport() {
+    const last100Requests = this.metrics.requests.slice(-100);
+    
+    return {
+      overview: {
+        totalRequests: this.metrics.requests.length,
+        averageLatency: this.calculateAverageLatency(last100Requests),
+        cacheHitRate: this.calculateCacheHitRate(last100Requests),
+        errorRate: this.calculateErrorRate(last100Requests)
+      },
+      modelPerformance: this.getModelPerformanceReport(),
+      recommendations: this.generateRecommendations()
+    };
+  }
+
+  generateRecommendations() {
+    const recommendations = [];
+    const report = this.getPerformanceReport();
+    
+    // High latency recommendation
+    if (report.overview.averageLatency > 3000) {
+      recommendations.push({
+        type: 'performance',
+        severity: 'medium',
+        message: 'Average latency is high. Consider optimizing context gathering or upgrading models.',
+        action: 'optimize-context-gathering'
+      });
+    }
+    
+    // Low cache hit rate
+    if (report.overview.cacheHitRate < 0.4) {
+      recommendations.push({
+        type: 'caching',
+        severity: 'low',
+        message: 'Cache hit rate is low. Review caching strategy.',
+        action: 'improve-caching'
+      });
+    }
+    
+    // Model usage optimization
+    const slowestModel = this.findSlowestModel();
+    if (slowestModel) {
+      recommendations.push({
+        type: 'model-optimization',
+        severity: 'medium',
+        message: `${slowestModel} has high latency. Consider routing simpler queries to faster models.`,
+        action: 'optimize-model-routing'
+      });
+    }
+    
+    return recommendations;
+  }
+}
+```
+
+### 3. Intelligent Caching System
+
+```bash
+# Create advanced caching
+touch src/lib/intelligent-cache.js
+nano src/lib/intelligent-cache.js
+```
+
+```javascript
+export class IntelligentCache {
+  constructor() {
+    this.cache = new Map();
+    this.contextCache = new Map();
+    this.responseCache = new Map();
+    this.analytics = new Map();
+    
+    this.config = {
+      maxSize: 10000,
+      ttl: 3600000, // 1 hour default
+      contextTtl: 7200000, // 2 hours for context
+      responseTtl: 1800000  // 30 minutes for responses
+    };
+  }
+
+  generateCacheKey(request, context) {
+    const keyData = {
+      message: this.normalizeMessage(request.message),
+      model: request.model,
+      contextHash: this.hashContext(context),
+      userId: request.userId // For personalized caching
+    };
+    
+    return this.hashObject(keyData);
+  }
+
+  normalizeMessage(message) {
+    // Normalize for better cache hits
+    return message
+      .toLowerCase()
+      .trim()
+      .replace(/\s+/g, ' ')
+      .replace(/[.,!?;:]$/, ''); // Remove trailing punctuation
+  }
+
+  async get(request, context) {
+    const key = this.generateCacheKey(request, context);
+    const cached = this.responseCache.get(key);
+    
+    if (cached && !this.isExpired(cached)) {
+      // Update cache analytics
+      this.updateCacheAnalytics(key, 'hit');
+      
+      // Refresh TTL for popular items
+      if (this.analytics.get(key)?.hits > 5) {
+        cached.expires = Date.now() + this.config.responseTtl;
+      }
+      
+      return {
+        ...cached.data,
+        fromCache: true,
+        cacheAge: Date.now() - cached.created
+      };
+    }
+    
+    this.updateCacheAnalytics(key, 'miss');
+    return null;
+  }
+
+  async set(request, context, response) {
+    const key = this.generateCacheKey(request, context);
+    
+    // Don't cache errors or very personalized responses
+    if (this.shouldCache(request, response)) {
+      const cacheEntry = {
+        data: response,
+        created: Date.now(),
+        expires: Date.now() + this.determineTTL(request, response),
+        accessCount: 0,
+        lastAccessed: Date.now()
+      };
+      
+      this.responseCache.set(key, cacheEntry);
+      this.cleanupExpired();
+    }
+  }
+
+  shouldCache(request, response) {
+    // Don't cache if response contains user-specific data
+    if (this.containsPersonalData(response)) return false;
+    
+    // Don't cache real-time data requests
+    if (this.isRealTimeQuery(request.message)) return false;
+    
+    // Don't cache errors
+    if (response.error) return false;
+    
+    // Cache knowledge queries, not personal conversations
+    return this.isKnowledgeQuery(request.message);
+  }
+
+  isKnowledgeQuery(message) {
+    const knowledgeIndicators = [
+      'what is', 'how does', 'explain', 'define',
+      'tell me about', 'describe', 'what are'
+    ];
+    
+    return knowledgeIndicators.some(indicator => 
+      message.toLowerCase().includes(indicator)
+    );
+  }
+
+  // Context caching for RAG results
+  async getCachedContext(query, type) {
+    const key = `${type}:${this.hashText(query)}`;
+    const cached = this.contextCache.get(key);
+    
+    if (cached && !this.isExpired(cached)) {
+      return cached.data;
+    }
+    
+    return null;
+  }
+
+  async setCachedContext(query, type, contextData) {
+    const key = `${type}:${this.hashText(query)}`;
+    
+    this.contextCache.set(key, {
+      data: contextData,
+      created: Date.now(),
+      expires: Date.now() + this.config.contextTtl
+    });
+  }
+}
+```
+
+### 4. Request Queue & Rate Limiting
+
+```bash
+# Create request management
+touch src/lib/request-manager.js
+nano src/lib/request-manager.js
+```
+
+```javascript
+export class RequestManager {
+  constructor() {
+    this.queues = {
+      high: [],
+      normal: [],
+      low: []
+    };
+    
+    this.rateLimits = new Map();
+    this.processing = false;
+    
+    this.config = {
+      maxConcurrent: 5,
+      rateLimit: {
+        requestsPerMinute: 60,
+        requestsPerHour: 1000
+      },
+      queueTimeout: 30000 // 30 seconds
+    };
+  }
+
+  async addRequest(request) {
+    // Check rate limits
+    await this.checkRateLimit(request.userId);
+    
+    // Determine priority
+    const priority = this.determinePriority(request);
+    
+    // Add to appropriate queue
+    const queueItem = {
+      ...request,
+      priority,
+      timestamp: Date.now(),
+      timeout: Date.now() + this.config.queueTimeout
+    };
+    
+    this.queues[priority].push(queueItem);
+    
+    // Start processing if not already running
+    if (!this.processing) {
+      this.processQueue();
+    }
+    
+    return new Promise((resolve, reject) => {
+      queueItem.resolve = resolve;
+      queueItem.reject = reject;
+    });
+  }
+
+  async processQueue() {
+    this.processing = true;
+    
+    while (this.hasRequests()) {
+      const request = this.getNextRequest();
+      
+      if (!request) {
+        await this.sleep(100);
+        continue;
+      }
+      
+      // Check if request has timed out
+      if (Date.now() > request.timeout) {
+        request.reject(new Error('Request timeout'));
+        continue;
+      }
+      
+      try {
+        // Process the request
+        const result = await this.executeRequest(request);
+        request.resolve(result);
+      } catch (error) {
+        request.reject(error);
+      }
+    }
+    
+    this.processing = false;
+  }
+
+  determinePriority(request) {
+    // High priority: errors, admin users, short requests
+    if (request.isRetry || request.userType === 'admin') {
+      return 'high';
+    }
+    
+    // Low priority: long requests, batch operations
+    if (request.message.length > 1000 || request.type === 'batch') {
+      return 'low';
+    }
+    
+    return 'normal';
+  }
+
+  getNextRequest() {
+    // Process high priority first
+    if (this.queues.high.length > 0) {
+      return this.queues.high.shift();
+    }
+    
+    // Then normal and low in round-robin
+    if (this.queues.normal.length > 0 && this.queues.low.length > 0) {
+      // Alternate between normal and low
+      return Math.random() < 0.7 ? 
+        this.queues.normal.shift() : 
+        this.queues.low.shift();
+    }
+    
+    return this.queues.normal.shift() || this.queues.low.shift();
+  }
+}
+```
+
+### 5. API Route Optimization
+
+```bash
+# Update your main API route
+nano src/app/api/chat/route.js
+```
+
+```javascript
+import { PipelineOrchestrator } from '@/lib/pipeline-orchestrator';
+import { PerformanceMonitor } from '@/lib/performance-monitor';
+import { IntelligentCache } from '@/lib/intelligent-cache';
+import { RequestManager } from '@/lib/request-manager';
+
+// Initialize services
+const pipeline = new PipelineOrchestrator();
+const monitor = new PerformanceMonitor();
+const cache = new IntelligentCache();
+const requestManager = new RequestManager();
+
+export async function POST(request) {
+  try {
+    const requestData = await request.json();
+    
+    // Add request to managed queue
+    const result = await requestManager.addRequest({
+      ...requestData,
+      timestamp: Date.now(),
+      ip: request.headers.get('x-forwarded-for')
+    });
+    
+    return NextResponse.json(result);
+    
+  } catch (error) {
+    console.error('API Error:', error);
+    
+    // Log error for monitoring
+    await monitor.recordError(error, requestData);
+    
+    return NextResponse.json(
+      { 
+        error: 'Request failed',
+        requestId: requestData?.requestId,
+        retryAfter: error.retryAfter || 5000
+      },
+      { status: error.status || 500 }
+    );
+  }
+}
+
+// Health check endpoint
+export async function GET() {
+  const health = {
+    status: 'healthy',
+    timestamp: Date.now(),
+    performance: monitor.getPerformanceReport(),
+    cacheStats: cache.getStats(),
+    queueStatus: requestManager.getStatus()
+  };
+  
+  return NextResponse.json(health);
+}
+```
+
+### 6. Create Dashboard for Monitoring
+
+```bash
+# Create monitoring dashboard
+touch src/app/dashboard/page.js
+nano src/app/dashboard/page.js
+```
+
+```javascript
+'use client';
+import { useState, useEffect } from 'react';
+
+export default function Dashboard() {
+  const [metrics, setMetrics] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+
+  useEffect(() => {
+    fetchMetrics();
+    const interval = setInterval(fetchMetrics, 10000); // Refresh every 10s
+    return () => clearInterval(interval);
+  }, []);
+
+  const fetchMetrics = async () => {
+    setRefreshing(true);
+    try {
+      const response = await fetch('/api/chat', { method: 'GET' });
+      const data = await response.json();
+      setMetrics(data);
+    } catch (error) {
+      console.error('Failed to fetch metrics:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  if (!metrics) return <div className="p-8">Loading dashboard...</div>;
+
+  return (
+    <div className="p-8 max-w-7xl mx-auto">
+      <div className="mb-8">
+        <h1 className="text-3xl font-bold mb-2">AI Pipeline Dashboard</h1>
+        <div className="flex items-center gap-4">
+          <span className={`px-3 py-1 rounded-full text-sm ${
+            metrics.status === 'healthy' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+          }`}>
+            {metrics.status}
+          </span>
+          <button 
+            onClick={fetchMetrics}
+            disabled={refreshing}
+            className="px-4 py-2 bg-blue-500 text-white rounded disabled:bg-gray-300"
+          >
+            {refreshing ? 'Refreshing...' : 'Refresh'}
+          </button>
+        </div>
+      </div>
+
+      {/* Performance Metrics */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+        <MetricCard 
+          title="Avg Latency"
+          value={`${metrics.performance.overview.averageLatency}ms`}
+          trend="stable"
+        />
+        <MetricCard 
+          title="Cache Hit Rate"
+          value={`${(metrics.performance.overview.cacheHitRate * 100).toFixed(1)}%`}
+          trend="improving"
+        />
+        <MetricCard 
+          title="Total Requests"
+          value={metrics.performance.overview.totalRequests}
+          trend="stable"
+        />
+        <MetricCard 
+          title="Error Rate"
+          value={`${(metrics.performance.overview.errorRate * 100).toFixed(2)}%`}
+          trend="stable"
+        />
+      </div>
+
+      {/* Model Performance */}
+      <div className="bg-white rounded-lg shadow p-6 mb-8">
+        <h2 className="text-xl font-semibold mb-4">Model Performance</h2>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="border-b">
+                <th className="text-left p-2">Model</th>
+                <th className="text-left p-2">Requests</th>
+                <th className="text-left p-2">Avg Latency</th>
+                <th className="text-left p-2">Cache Hit Rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {Object.entries(metrics.performance.modelPerformance || {}).map(([model, data]) => (
+                <tr key={model} className="border-b">
+                  <td className="p-2 font-medium">{model}</td>
+                  <td className="p-2">{data.requests}</td>
+                  <td className="p-2">{Math.round(data.totalLatency / data.requests)}ms</td>
+                  <td className="p-2">{Math.round((data.cacheHits / data.requests) * 100)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Recommendations */}
+      {metrics.performance.recommendations && (
+        <div className="bg-yellow-50 rounded-lg p-6">
+          <h2 className="text-xl font-semibold mb-4">Optimization Recommendations</h2>
+          <div className="space-y-3">
+            {metrics.performance.recommendations.map((rec, index) => (
+              <div key={index} className="flex items-start gap-3">
+                <span className={`px-2 py-1 rounded text-xs ${
+                  rec.severity === 'high' ? 'bg-red-100 text-red-800' :
+                  rec.severity === 'medium' ? 'bg-yellow-100 text-yellow-800' :
+                  'bg-blue-100 text-blue-800'
+                }`}>
+                  {rec.severity}
+                </span>
+                <div>
+                  <p className="font-medium">{rec.type}</p>
+                  <p className="text-gray-600">{rec.message}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MetricCard({ title, value, trend }) {
+  return (
+    <div className="bg-white rounded-lg shadow p-6">
+      <h3 className="text-sm font-medium text-gray-500 mb-1">{title}</h3>
+      <div className="flex items-center justify-between">
+        <span className="text-2xl font-bold">{value}</span>
+        <span className={`text-sm px-2 py-1 rounded ${
+          trend === 'improving' ? 'bg-green-100 text-green-800' :
+          trend === 'declining' ? 'bg-red-100 text-red-800' :
+          'bg-gray-100 text-gray-800'
+        }`}>
+          {trend}
+        </span>
+      </div>
+    </div>
+  );
+}
+```
+
+### 7. Test Your Optimized Pipeline
+
+```bash
+# Run the optimized system
+npm run dev
+
+# Test with monitoring
+curl -X POST http://localhost:3000/api/chat \
+  -H "Content-Type: application/json" \
+  -d '{
+    "message": "Test optimization pipeline",
+    "userId": "test-user",
+    "priority": "normal"
+  }'
+
+# Check dashboard
+open http://localhost:3000/dashboard
+```
+
+## Next Immediate Steps:
+
+1. **Implement the PipelineOrchestrator** - This is your central nervous system
+2. **Add monitoring** - Essential for understanding performance
+3. **Set up caching** - Will dramatically improve response times
+4. **Create the dashboard** - Visual insight into your system
+
+This gives you a production-ready, scalable pipeline with real-time monitoring and optimization recommendations. Want me to help implement any of these components first?

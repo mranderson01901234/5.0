@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Find Clerk User ID</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: #0f0f0f;
+            color: #ffffff;
+        }
+        .result {
+            background: #1a1a1a;
+            padding: 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border: 1px solid #333;
+        }
+        .user-id {
+            font-family: monospace;
+            font-size: 18px;
+            color: #6c47ff;
+            background: #000;
+            padding: 10px;
+            border-radius: 4px;
+            word-break: break-all;
+        }
+        button {
+            background: #6c47ff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        button:hover {
+            background: #5a3ae6;
+        }
+        .instructions {
+            background: #1a1a1a;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 20px 0;
+            border-left: 4px solid #6c47ff;
+        }
+    </style>
+</head>
+<body>
+    <h1>Find Your Clerk User ID</h1>
+    
+    <div class="instructions">
+        <p><strong>Instructions:</strong></p>
+        <ol>
+            <li>Make sure you're logged into your application</li>
+            <li>Click the button below to extract your user ID</li>
+            <li>Copy the user ID and use it to migrate your memories</li>
+        </ol>
+    </div>
+
+    <button onclick="findUserId()">Extract User ID</button>
+
+    <div id="results"></div>
+
+    <script>
+        async function findUserId() {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<div class="result"><p>Looking for user ID...</p></div>';
+
+            let userId = null;
+            let methods = [];
+
+            // Method 1: Check localStorage for Clerk session
+            try {
+                const clerkSession = localStorage.getItem('__clerk_db_jwt');
+                if (clerkSession) {
+                    try {
+                        const parsed = JSON.parse(clerkSession);
+                        if (parsed?.jwt) {
+                            const parts = parsed.jwt.split('.');
+                            if (parts.length === 3) {
+                                const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
+                                userId = payload.sub || payload.userId || payload.id;
+                                if (userId) methods.push('localStorage (__clerk_db_jwt)');
+                            }
+                        }
+                    } catch (e) {}
+                }
+            } catch (e) {}
+
+            // Method 2: Check sessionStorage
+            if (!userId) {
+                try {
+                    const keys = Object.keys(sessionStorage);
+                    for (const key of keys) {
+                        if (key.includes('clerk') || key.includes('session')) {
+                            try {
+                                const value = sessionStorage.getItem(key);
+                                const parsed = JSON.parse(value);
+                                if (parsed?.userId || parsed?.id || parsed?.sub) {
+                                    userId = parsed.userId || parsed.id || parsed.sub;
+                                    if (userId) methods.push(`sessionStorage (${key})`);
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // Method 3: Check all localStorage keys for Clerk data
+            if (!userId) {
+                try {
+                    const keys = Object.keys(localStorage);
+                    for (const key of keys) {
+                        if (key.toLowerCase().includes('clerk') || key.toLowerCase().includes('user')) {
+                            try {
+                                const value = localStorage.getItem(key);
+                                if (value && (value.startsWith('{') || value.startsWith('['))) {
+                                    const parsed = JSON.parse(value);
+                                    // Look for user ID patterns
+                                    if (parsed?.id && parsed.id.startsWith('user_')) {
+                                        userId = parsed.id;
+                                        methods.push(`localStorage (${key})`);
+                                        break;
+                                    }
+                                    if (parsed?.userId && parsed.userId.startsWith('user_')) {
+                                        userId = parsed.userId;
+                                        methods.push(`localStorage (${key})`);
+                                        break;
+                                    }
+                                    if (parsed?.sub && parsed.sub.startsWith('user_')) {
+                                        userId = parsed.sub;
+                                        methods.push(`localStorage (${key})`);
+                                        break;
+                                    }
+                                    // Check nested objects
+                                    if (parsed?.user?.id && parsed.user.id.startsWith('user_')) {
+                                        userId = parsed.user.id;
+                                        methods.push(`localStorage (${key}.user.id)`);
+                                        break;
+                                    }
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // Method 4: Try to decode JWT from Authorization header (if available)
+            // This won't work from browser, but document it
+
+            // Display results
+            if (userId) {
+                resultsDiv.innerHTML = `
+                    <div class="result">
+                        <h2>✅ User ID Found!</h2>
+                        <p>Found via: ${methods.join(', ')}</p>
+                        <p><strong>Your Clerk User ID:</strong></p>
+                        <div class="user-id">${userId}</div>
+                        <p style="margin-top: 20px;">
+                            <strong>Next Steps:</strong><br>
+                            Run this command to migrate your memories:<br>
+                            <code style="background: #000; padding: 10px; display: block; margin-top: 10px; border-radius: 4px;">
+                                node scripts/migrate_memories_userid.mjs dparker918@yahoo.com ${userId}
+                            </code>
+                        </p>
+                    </div>
+                `;
+            } else {
+                resultsDiv.innerHTML = `
+                    <div class="result">
+                        <h2>❌ User ID Not Found</h2>
+                        <p>Could not automatically extract your user ID. Try these alternatives:</p>
+                        <ol>
+                            <li><strong>Browser Console:</strong> Open DevTools (F12), go to Console tab, and run:
+                                <code style="display: block; background: #000; padding: 5px; margin: 5px 0; border-radius: 4px;">
+                                    window.Clerk?.user?.id
+                                </code>
+                            </li>
+                            <li><strong>Network Tab:</strong> 
+                                <ul>
+                                    <li>Open DevTools (F12)</li>
+                                    <li>Go to Network tab</li>
+                                    <li>Make a request in your app</li>
+                                    <li>Find a request to your API</li>
+                                    <li>Check the Authorization header - decode the JWT token</li>
+                                </ul>
+                            </li>
+                            <li><strong>Application Storage:</strong>
+                                <ul>
+                                    <li>Open DevTools (F12)</li>
+                                    <li>Go to Application tab → Storage → Local Storage</li>
+                                    <li>Look for Clerk-related keys</li>
+                                </ul>
+                            </li>
+                        </ol>
+                    </div>
+                `;
+            }
+        }
+
+        // Auto-run on load
+        window.addEventListener('load', () => {
+            // Check if we're on the same domain as the app
+            if (window.location.hostname === 'localhost' || window.location.hostname.includes('localhost')) {
+                findUserId();
+            }
+        });
+    </script>
+</body>
+</html>
+

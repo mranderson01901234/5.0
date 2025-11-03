@@ -1,0 +1,44 @@
+{
+  "name": "llm-gateway-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "pnpm typecheck && pnpm lint && pnpm -r run build",
+    "lint": "pnpm -r run lint",
+    "lint:fix": "pnpm -r run lint:fix || pnpm -r run lint",
+    "typecheck": "pnpm -r run typecheck",
+    "test": "pnpm -r run test",
+    "dev:gateway": "pnpm --filter @llm-gateway/app dev",
+    "dev:web": "pnpm --filter web dev",
+    "load:test": "pnpm --filter tools/load start",
+    "openapi:build": "pnpm --filter packages/shared run build",
+    "test:conversation": "pnpm --filter @llm-gateway/app test:conversation",
+    "inspect:prompt": "pnpm --filter @llm-gateway/app inspect:prompt",
+    "prepare": "husky install || true",
+    "lint-staged": "lint-staged"
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^20.1.0",
+    "@commitlint/config-conventional": "^20.0.0",
+    "@types/node": "^20.10.0",
+    "@typescript-eslint/eslint-plugin": "^6.15.0",
+    "@typescript-eslint/parser": "^6.15.0",
+    "eslint": "^8.56.0",
+    "husky": "^9.0.11",
+    "lint-staged": "^15.2.0",
+    "prettier": "^3.1.1",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+  },
+  "lint-staged": {
+    "*.{ts,tsx,js,jsx}": [
+      "eslint --max-warnings=0 --fix"
+    ],
+    "*.{ts,tsx,js,jsx,css,md,json}": [
+      "prettier --write"
+    ]
+  }
+}

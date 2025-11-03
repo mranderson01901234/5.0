@@ -1,0 +1,184 @@
+**FILE: `MOBILE_BUILD_BLUEPRINT.md`**
+
+```md
+# 📱 Mobile Build Blueprint
+
+## 1. Objective
+Create a **dedicated, production-grade mobile view** that mirrors the desktop chat’s style (fonts, colors, UI feel) but runs as a **PWA-optimized, streaming-first interface**.  
+This view should be fully isolated (no risk to desktop layout) while reusing shared services, API logic, and state definitions.
+
+---
+
+## 2. Architecture Overview
+| Layer | Goal | Tech |
+|-------|------|------|
+| **UI Layer** | Minimal text-stream chat interface | React + Tailwind |
+| **State Layer** | Zustand (isolated slice) | `useMobileChatStore.ts` |
+| **Networking** | SSE (stream-first) with backoff & abort | Native Fetch API |
+| **Offline/Queue** | IndexedDB for message queue | `idb` |
+| **Performance** | Virtualized list + 60fps scroll | `react-virtuoso` |
+| **PWA** | Offline-ready installable app | `vite-plugin-pwa` |
+| **Accessibility** | Focus traps, ARIA roles | WAI-ARIA compliant |
+
+---
+
+## 3. File Structure
+```
+
+src/
+├── mobile/
+│    ├── main.tsx
+│    ├── MobileApp.tsx
+│    ├── screens/
+│    │    ├── MobileChatScreen.tsx
+│    │    └── MobileSettingsScreen.tsx
+│    ├── store/
+│    │    └── useMobileChatStore.ts
+│    ├── hooks/
+│    │    ├── useMobileStream.ts
+│    │    └── useKeyboardHandler.ts
+│    ├── ui/
+│    │    ├── MobileMessage.tsx
+│    │    └── PullToScrollButton.tsx
+│    ├── styles.css
+│    ├── pwa/
+│    │    ├── service-worker.ts
+│    │    ├── manifest.webmanifest
+│    │    └── registerSW.ts
+│    └── index.ts
+├── services/
+│    └── gateway.ts     ← shared API
+└── styles/
+└── globals.css    ← shared tokens
+
+````
+
+---
+
+## 4. Design Rules
+- Inherit **font and color tokens** from `/styles/globals.css`.
+- **No bubbles** — pure text layout.
+- Maintain **left/right alignment** by role.
+- Use `font-sans`, `text-[15px]`, `leading-relaxed`, and accent `#7c5cff`.
+- Respect `env(safe-area-inset-*)` for iOS devices.
+
+---
+
+## 5. Core Features
+### ✅ Chat Rendering
+- Stream messages via `/api/stream` SSE.
+- Append incrementally per token.
+- Maintain scroll position during stream.
+
+### ✅ Message Sending
+- Immediate optimistic render.
+- Queue offline messages in IndexedDB.
+- Retry on reconnect.
+
+### ✅ Virtualization
+- Use `react-virtuoso` for 10k+ messages.
+- Keep DOM nodes ≤ 100 visible.
+
+### ✅ Keyboard Handling
+- Use `window.visualViewport` to adjust scroll bottom.
+- Keep composer visible when keyboard opens.
+
+### ✅ Offline & PWA
+- Cache `/mobile.html` + assets (Workbox).
+- Cache-first static, network-first API.
+- Display “offline” banner when disconnected.
+
+---
+
+## 6. PWA Setup
+Add plugin:
+```bash
+pnpm add vite-plugin-pwa workbox-window
+````
+
+Config snippet in `vite.config.ts`:
+
+```ts
+import { VitePWA } from 'vite-plugin-pwa';
+plugins: [
+  react(),
+  tsconfigPaths(),
+  VitePWA({
+    registerType: 'autoUpdate',
+    includeAssets: ['favicon.svg'],
+    manifest: {
+      name: 'Chat App',
+      short_name: 'Chat',
+      theme_color: '#000000',
+      background_color: '#000000',
+      display: 'standalone',
+      start_url: '/mobile.html',
+      icons: [{ src: '/pwa-icon-512.png', sizes: '512x512', type: 'image/png' }]
+    }
+  }),
+]
+```
+
+---
+
+## 7. Performance Checklist
+
+| Metric                  | Target      | Technique                    |
+| ----------------------- | ----------- | ---------------------------- |
+| Load JS                 | < 180 KB gz | Code split non-critical UI   |
+| FPS                     | ≥ 55–60     | Virtualization               |
+| Input latency           | < 150 ms    | useCallback + memo           |
+| SSE time-to-first-token | < 300 ms    | Warm API + edge cache        |
+| Offline recovery        | < 2 s       | IndexedDB flush on reconnect |
+
+---
+
+## 8. Testing Scenarios
+
+* ✅ Scroll > 10k messages → smooth
+* ✅ Rotate device → layout stable
+* ✅ Input while streaming → no reflow
+* ✅ Offline send → queued + retried
+* ✅ Install PWA → runs standalone
+
+---
+
+## 9. Deployment Notes
+
+| Environment | Service                   | Role                        |
+| ----------- | ------------------------- | --------------------------- |
+| UI          | Vercel / Cloudflare Pages | CDN edge static             |
+| API         | Fly.io / Render           | SSE container (2+ replicas) |
+| Cache       | Cloudflare CDN            | Edge cache for GET          |
+| Queue       | Redis / Upstash           | Background task sync        |
+
+---
+
+## 10. Roadmap
+
+1. ✅ Isolated Mobile Shell
+2. ⚙️ Add PWA + Offline Queue
+3. ⚡ Add Virtualized Message Feed
+4. 📈 Integrate Metrics Panel
+5. 🔁 Auto Canary Deploy + Lighthouse Check
+
+---
+
+## 11. KPI Targets
+
+| KPI                    | Target  |
+| ---------------------- | ------- |
+| First Render           | < 1.5s  |
+| First Token            | < 300ms |
+| Scroll FPS             | ≥ 55    |
+| Offline Queue Recovery | < 2s    |
+| Crash-Free Sessions    | ≥ 99.9% |
+
+---
+
+**Next Action:**
+Run `pnpm dev:mobile` → verify `/mobile.html` load speed, font fidelity, and smooth scroll.
+Then proceed to add `vite-plugin-pwa` and `IndexedDB` queue per this plan.
+
+```
+```

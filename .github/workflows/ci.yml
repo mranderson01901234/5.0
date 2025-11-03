@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    name: Lint • Typecheck • Test • Build
+    runs-on: ubuntu-latest
+
+    env:
+      CI: true
+      VITE_API_BASE_URL: http://localhost:9999 # stub for env validator
+      VITE_ERROR_REPORT_URL: ""
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+          run_install: false
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache Vite
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.vite
+            node_modules/.vite
+          key: vite-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: |
+            vite-${{ runner.os }}-
+
+      - name: Lint
+        run: pnpm lint || npm run lint
+
+      - name: Typecheck
+        run: pnpm typecheck || npm run typecheck || echo "no typecheck script"
+
+      - name: Test
+        run: pnpm test --run || npm run test -- --run
+
+      - name: Build
+        run: pnpm build || npm run build

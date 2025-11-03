@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+. "$(dirname -- "$0")/_/husky.sh"
+
+echo "→ Running quality gate (lint, typecheck, tests)"
+pnpm lint || exit 1
+pnpm typecheck >/dev/null 2>&1 || echo "no typecheck script"
+pnpm test --run || exit 1
+

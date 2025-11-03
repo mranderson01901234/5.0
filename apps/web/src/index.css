@@ -1,0 +1,410 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 15 15 15;
+  --foreground: 255 255 255;
+
+  --glass-light: rgba(255, 255, 255, 0.05);
+  --glass-medium: rgba(255, 255, 255, 0.08);
+  --glass-heavy: rgba(255, 255, 255, 0.12);
+
+  --purple: 168 85 247;
+  --blue: 59 130 246;
+
+  --bg: #0f0f0f;
+  --surface: #12131a;
+  --surface-2: #151724;
+  --border: rgba(255,255,255,0.1);
+  --text: rgba(255,255,255,0.95);
+  --muted: rgba(255,255,255,0.5);
+  --accent: #a855f7;
+  --accent-blue: #3b82f6;
+  --glow: rgba(168,85,247,0.22);
+}
+
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  @apply bg-[#0f0f0f] text-white/95 antialiased;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+}
+
+.glass {
+  @apply backdrop-blur-xl;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.glass-light {
+  @apply backdrop-blur-[12px];
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.glass-heavy {
+  @apply backdrop-blur-[20px];
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+/* Chat input textarea - ensure proper inline rendering of mathematical notation */
+/* Prevents subscripts/superscripts from stacking vertically */
+.math-input,
+textarea.math-input {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  font-variant-ligatures: none;
+  font-feature-settings: normal;
+  text-rendering: optimizeLegibility;
+  line-height: 1.5 !important;
+  white-space: pre-wrap !important;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  overflow-x: visible;
+  overflow-y: auto;
+  /* Ensure inline rendering - prevent vertical stacking */
+  vertical-align: baseline;
+  font-size: 15px;
+  letter-spacing: normal;
+}
+
+/* Ensure subscripts and superscripts in input render inline */
+textarea.math-input::placeholder {
+  line-height: 1.5;
+  vertical-align: baseline;
+}
+
+/* Anthropic Claude default typography */
+.message-content {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  font-weight: 500;
+  font-size: 17px;
+  color: rgba(250, 245, 215, 0.95);
+  line-height: 1.6;
+  letter-spacing: normal;
+  scroll-margin: 5rem; /* scroll-m-20 equivalent */
+  overflow: visible;
+  overflow-x: hidden !important; /* NO horizontal scrollbars */
+  overflow-y: visible;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+}
+
+/* User messages - slightly less bold */
+.message-content-user {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+  font-weight: 500; /* medium weight */
+  font-size: 17px;
+  color: rgba(236, 236, 241, 0.95);
+  line-height: 1.75;
+  letter-spacing: -0.025em;
+  overflow: visible;
+  overflow-x: hidden !important; /* NO horizontal scrollbars */
+  overflow-y: visible;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+}
+
+.user-message-bubble .message-content-user p {
+  margin-bottom: 0;
+  overflow: visible;
+  overflow-x: hidden !important; /* NO horizontal scrollbars */
+  overflow-y: visible;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+}
+
+/* User message chat bubble - slim, transparent version of input box */
+.user-message-bubble {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 18px;
+  padding: 8px 16px 6px 16px;
+  display: inline-block;
+  max-width: 100%;
+  overflow: visible;
+  overflow-x: hidden !important; /* NO horizontal scrollbars */
+  overflow-y: visible;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Sidebar delete button */
+.sidebar-delete-btn {
+  position: absolute;
+  right: 0.5rem;
+  top: 50%;
+  transform: translateY(-50%);
+  opacity: 0;
+  transition: opacity 200ms;
+  padding: 0.375rem;
+  border-radius: 0.375rem;
+  color: rgba(255, 255, 255, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  z-index: 10;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.group:hover .sidebar-delete-btn {
+  opacity: 1;
+}
+
+.sidebar-delete-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.message-content h1,
+.message-content h2,
+.message-content h3,
+.message-content h4,
+.message-content h5,
+.message-content h6 {
+  font-family: 'Poppins';
+  font-weight: 600;
+  margin-top: 1.5em;
+  margin-bottom: 0.5em;
+  color: rgba(255, 255, 255, 0.98);
+  letter-spacing: -0.01em;
+  overflow: visible;
+  overflow-x: visible;
+  overflow-y: visible;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+}
+
+.message-content h1 { font-size: 1.5em; }
+
+/* Clerk UserButton dropdown menu dark theme overrides */
+.cl-userButtonPopoverCard,
+.cl-userButtonPopoverActions,
+.cl-userButtonPopoverActionButton,
+.cl-menuButton,
+.cl-menuItem {
+  background-color: #0f0f0f !important;
+  color: #ffffff !important;
+}
+
+.cl-userButtonPopoverActionButtonText,
+.cl-menuButtonText,
+.cl-menuItemText {
+  color: #ffffff !important;
+}
+
+.cl-userButtonPopoverActionButton:hover,
+.cl-menuButton:hover,
+.cl-menuItem:hover {
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+.message-content h2 { font-size: 1.3em; }
+.message-content h3 { font-size: 1.15em; }
+
+.message-content p {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  line-height: 1.6;
+  letter-spacing: normal;
+  margin-bottom: 1em;
+  overflow: visible;
+  overflow-x: visible;
+  overflow-y: visible;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+}
+
+.message-content ul,
+.message-content ol {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  line-height: 1.6;
+  letter-spacing: normal;
+  margin: 1em 0;
+  padding-left: 1.5em;
+  overflow: visible;
+  overflow-x: visible;
+  overflow-y: visible;
+}
+
+.message-content ol {
+  list-style-type: decimal;
+  list-style-position: outside;
+  counter-reset: none;
+}
+
+.message-content ol li {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  line-height: 1.6;
+  letter-spacing: normal;
+  display: list-item;
+  margin-bottom: 0.5em;
+  /* Ensure each list item maintains sequential numbering */
+}
+
+.message-content ul li {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  line-height: 1.6;
+  letter-spacing: normal;
+  margin-bottom: 0.5em;
+}
+
+.message-content code {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 4px;
+  padding: 0.15em 0.4em;
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', 'Droid Sans Mono', 'Source Code Pro', monospace;
+  font-size: 0.9em;
+  overflow-x: visible;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  max-width: 100%;
+}
+
+.message-content pre {
+  background: rgba(0, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 1em;
+  margin: 1em 0;
+  overflow-x: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.message-content pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.message-content strong {
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.98);
+  overflow-x: visible;
+}
+
+.message-content em {
+  font-style: italic;
+  color: rgba(255, 255, 255, 0.92);
+  overflow-x: visible;
+}
+
+/* Mathematical equations - wrap text instead of scrolling */
+/* NO horizontal scrollbars - text wraps */
+.message-content [data-math="true"],
+.message-content .math-equation {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  display: block;
+  line-height: 1.6;
+  margin: 0.5em 0;
+  overflow-x: hidden;
+  overflow-y: visible;
+  max-width: 100%;
+  min-width: 0;
+}
+
+/* Inline mathematical expressions within paragraphs */
+.message-content .math-inline {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  display: inline;
+  line-height: 1.5;
+  max-width: 100%;
+}
+
+/* User message bubble - wrap equations instead of scrolling */
+.user-message-bubble > [data-math="true"],
+.user-message-bubble > .math-equation,
+.user-message-bubble [data-math="true"],
+.user-message-bubble .math-equation {
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  overflow-x: hidden;
+  overflow-y: visible;
+  max-width: 100%;
+}
+
+/* No horizontal scrollbars anywhere - all content wraps */
+.message-content [data-math="true"]::-webkit-scrollbar,
+.message-content .math-equation::-webkit-scrollbar,
+.user-message-bubble [data-math="true"]::-webkit-scrollbar,
+.user-message-bubble .math-equation::-webkit-scrollbar {
+  display: none;
+}
+
+/* Highlight sections and important keywords */
+.message-content .highlight-section {
+  background: rgba(59, 130, 246, 0.15);
+  border-left: 3px solid rgba(59, 130, 246, 0.6);
+  padding: 12px 16px;
+  margin: 16px 0;
+  border-radius: 8px;
+  font-weight: 500;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.message-content .highlight-keyword {
+  background: rgba(59, 130, 246, 0.2);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.98);
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+/* Separator styling for research summary + LLM response */
+.message-content hr {
+  border: none;
+  border-top: 1px solid rgba(255, 255, 255, 0.15);
+  margin: 1.5em 0;
+  width: 100%;
+}
+
+.scrollbar-hide {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Skip link styling */
+.skip-link {
+  position: absolute;
+  top: -40px;
+  left: 0;
+  background: white;
+  color: black;
+  padding: 8px 16px;
+  text-decoration: none;
+  z-index: 100;
+  border-radius: 0 0 4px 0;
+}
+
+.skip-link:focus {
+  top: 0;
+  outline: 2px solid blue;
+}
+

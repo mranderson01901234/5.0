@@ -1,0 +1,42 @@
+{
+  "name": "@llm-gateway/app",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "./dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "test": "vitest run",
+    "test:conversation": "tsx src/runConversationTests.ts",
+    "inspect:prompt": "tsx src/runPromptInspector.ts",
+    "debug:search": "tsx src/runWebSearchDebugger.ts",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "typecheck": "tsc --noEmit",
+    "load:mock": "GATEWAY_MOCK=1 node dist/server.js"
+  },
+  "dependencies": {
+    "@clerk/clerk-sdk-node": "^5.1.6",
+    "@fastify/compress": "^6.4.0",
+    "@fastify/cors": "^8.5.0",
+    "@llm-gateway/shared": "workspace:*",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^17.2.3",
+    "fastify": "^4.25.2",
+    "fastify-plugin": "^5.1.0",
+    "ioredis": "^5.3.2",
+    "pino": "^8.17.2",
+    "undici": "^5.28.3",
+    "zod": "^3.22.4"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.8",
+    "@types/ioredis": "^5.0.0",
+    "@types/node": "^20.10.0",
+    "@vitest/ui": "^1.1.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.3",
+    "vitest": "^1.1.0"
+  }
+}

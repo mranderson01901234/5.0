@@ -1,0 +1,13 @@
+#!/bin/bash
+echo "🔍 Service Status Check:"
+echo ""
+echo "Gateway (8787):"
+lsof -ti:8787 > /dev/null 2>&1 && echo "  ✅ Running on port 8787" || echo "  ❌ NOT running"
+echo ""
+echo "Memory Service (3001):"
+lsof -ti:3001 > /dev/null 2>&1 && echo "  ✅ Running on port 3001" || echo "  ❌ NOT running"
+echo ""
+echo "Web App (5176):"
+lsof -ti:5176 > /dev/null 2>&1 && echo "  ✅ Running on port 5176" || echo "  ❌ NOT running"
+echo ""
+echo "To start all services: ./start.sh"
