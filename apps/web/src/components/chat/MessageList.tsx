@@ -9,8 +9,19 @@ const MessageListBase: React.FC = () => {
     () => conversations.find(c => c.id === currentThreadId),
     [conversations, currentThreadId]
   );
-  // Memoize messages array to provide stable reference
-  const items = useMemo<Message[]>(() => currentConv?.messages || [], [currentConv?.messages]);
+  // Memoize messages array to provide stable reference and remove duplicates by ID
+  const items = useMemo<Message[]>(() => {
+    if (!currentConv?.messages) return [];
+    // Remove duplicate messages by ID
+    const seenIds = new Set<string>();
+    return currentConv.messages.filter(msg => {
+      if (seenIds.has(msg.id)) {
+        return false;
+      }
+      seenIds.add(msg.id);
+      return true;
+    });
+  }, [currentConv?.messages]);
   const frChip = useChatStore(s => s.frChip);
   const ttfbMs = useChatStore(s => s.ttfbMs);
   const streaming = useChatStore(s => s.streaming);

@@ -57,6 +57,10 @@ export const useChatStore = create<State>((set)=>({
     const conv = s.conversations.find(c => c.id === s.currentThreadId);
     if(!conv) return s;
     
+    // Check for duplicate - don't add if message with same ID already exists
+    const isDuplicate = conv.messages.some(msg => msg.id === m.id);
+    if(isDuplicate) return s;
+    
     // Generate title from first user message
     let newTitle = conv.title;
     const hasUserMessages = conv.messages.some(msg => msg.role === "user");

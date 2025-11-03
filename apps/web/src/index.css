@@ -31,7 +31,7 @@
 
 body {
   @apply bg-[#0f0f0f] text-white/95 antialiased;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
 }
 
 .glass {
@@ -56,7 +56,7 @@ body {
 /* Prevents subscripts/superscripts from stacking vertically */
 .math-input,
 textarea.math-input {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
   font-variant-ligatures: none;
   font-feature-settings: normal;
   text-rendering: optimizeLegibility;
@@ -82,8 +82,8 @@ textarea.math-input::placeholder {
 .message-content {
   font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
   font-weight: 500;
-  font-size: 17px;
-  color: rgba(250, 245, 215, 0.95);
+  font-size: 30px;
+  color: rgba(255, 250, 200, 0.95);
   line-height: 1.6;
   letter-spacing: normal;
   scroll-margin: 5rem; /* scroll-m-20 equivalent */
@@ -97,12 +97,12 @@ textarea.math-input::placeholder {
 
 /* User messages - slightly less bold */
 .message-content-user {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif !important;
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace !important;
   font-weight: 500; /* medium weight */
-  font-size: 17px;
+  font-size: 24px !important;
   color: rgba(236, 236, 241, 0.95);
   line-height: 1.75;
-  letter-spacing: -0.025em;
+  letter-spacing: normal;
   overflow: visible;
   overflow-x: hidden !important; /* NO horizontal scrollbars */
   overflow-y: visible;
@@ -173,7 +173,7 @@ textarea.math-input::placeholder {
 .message-content h4,
 .message-content h5,
 .message-content h6 {
-  font-family: 'Poppins';
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
   font-weight: 600;
   margin-top: 1.5em;
   margin-bottom: 0.5em;
@@ -265,7 +265,7 @@ textarea.math-input::placeholder {
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 4px;
   padding: 0.15em 0.4em;
-  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', 'Droid Sans Mono', 'Source Code Pro', monospace;
+  font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
   font-size: 0.9em;
   overflow-x: visible;
   word-wrap: break-word;
