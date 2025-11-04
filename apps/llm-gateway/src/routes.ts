@@ -1763,10 +1763,12 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
               isFollowUp: EnhancedFollowUpDetector.isFollowUpQuery(lastQuery, body.messages.slice(0, -1))
             }, 'Provider selection with max_tokens enforcement');
             
-            // Use provider-specific max tokens
+            // Use provider-specific max tokens and enable thinking
             const providerOptions = {
               max_tokens: finalMaxTokens,
               temperature: body.temperature,
+              enableThinking: true, // Enable extended thinking for all models
+              thinkingBudget: 10000, // Max tokens for thinking
             };
             
             primaryStream = MOCK_MODE
@@ -1919,7 +1921,21 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             reply.raw.write(`event: slow_start\ndata: ${JSON.stringify({ ttfb_ms: ttfbMs })}\n\n`);
           }
 
-          reply.raw.write(`event: token\ndata: ${JSON.stringify(firstResult.value)}\n\n`);
+          // Handle first chunk - could be thinking or regular text
+          const firstChunk = firstResult.value;
+          if (typeof firstChunk === 'object' && firstChunk !== null && 'type' in firstChunk) {
+            if (firstChunk.type === 'thinking_delta' || firstChunk.type === 'thinking_start') {
+              // First chunk is thinking
+              const thinkingData = {
+                content: firstChunk.content || '',
+                type: firstChunk.type
+              };
+              reply.raw.write(`event: thinking_step\ndata: ${JSON.stringify(thinkingData)}\n\n`);
+            }
+          } else {
+            // Regular text token
+            reply.raw.write(`event: token\ndata: ${JSON.stringify(firstChunk)}\n\n`);
+          }
 
           // Keep capsule polling active for a bit longer (first 3-5 seconds of streaming)
           // This allows research to complete and inject even after first token
@@ -1938,8 +1954,35 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             const result = await iterator.next();
             if (result.done) break;
             const chunk = result.value;
+
+            // Handle thinking chunks from providers
+            if (typeof chunk === 'object' && chunk !== null && 'type' in chunk) {
+              if (chunk.type === 'thinking_delta' || chunk.type === 'thinking_start' || chunk.type === 'thinking_end') {
+                // Emit thinking step event
+                const thinkingData = {
+                  content: chunk.content || '',
+                  type: chunk.type
+                };
+                const eventStr = `event: thinking_step\ndata: ${JSON.stringify(thinkingData)}\n\n`;
+                reply.raw.write(eventStr);
+                bufferSize += eventStr.length;
+
+                const now = Date.now();
+                if (now - lastFlush >= flushInterval || bufferSize >= flushSize) {
+                  const response = reply.raw as any;
+                  if (typeof response.flush === 'function') {
+                    response.flush();
+                  }
+                  bufferSize = 0;
+                  lastFlush = now;
+                }
+                continue; // Don't count thinking as regular tokens
+              }
+            }
+
+            // Handle regular text chunks
             tokenCount++;
-            assistantContent += chunk;
+            assistantContent += chunk as string;
             const chunkStr = `event: token\ndata: ${JSON.stringify(chunk)}\n\n`;
             reply.raw.write(chunkStr);
             bufferSize += chunkStr.length;

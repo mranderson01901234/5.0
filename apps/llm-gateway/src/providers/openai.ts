@@ -20,7 +20,12 @@ export class OpenAIProvider extends BaseProvider {
   stream(
     messages: Array<MessageWithAttachments>,
     model: string,
-    options?: { max_tokens?: number; temperature?: number }
+    options?: {
+      max_tokens?: number;
+      temperature?: number;
+      enableThinking?: boolean;
+      thinkingBudget?: number;
+    }
   ): ProviderStreamResult {
     const pool = this.pool;
     return {
@@ -30,7 +35,23 @@ export class OpenAIProvider extends BaseProvider {
           role: m.role,
           content: m.content,
         }));
-        
+
+        // Build request body
+        const body: any = {
+          model,
+          messages: openaiMessages,
+          stream: true,
+          max_tokens: options?.max_tokens,
+        };
+
+        // For o1 models with reasoning, enable stream_options to get reasoning
+        if (options?.enableThinking && model.includes('o1')) {
+          body.stream_options = { include_usage: true };
+          // o1 models don't use temperature
+        } else {
+          body.temperature = options?.temperature;
+        }
+
         const response = await pool.request({
           path: '/v1/chat/completions',
           method: 'POST',
@@ -38,13 +59,7 @@ export class OpenAIProvider extends BaseProvider {
             'Content-Type': 'application/json',
             Authorization: `Bearer ${process.env.OPENAI_API_KEY || ''}`,
           },
-          body: JSON.stringify({
-            model,
-            messages: openaiMessages,
-            stream: true,
-            max_tokens: options?.max_tokens,
-            temperature: options?.temperature,
-          }),
+          body: JSON.stringify(body),
         });
 
         if (response.statusCode !== 200) {
@@ -69,9 +84,20 @@ export class OpenAIProvider extends BaseProvider {
               }
               try {
                 const parsed = JSON.parse(data);
-                const content = parsed.choices?.[0]?.delta?.content;
-                if (content) {
-                  yield content;
+                const delta = parsed.choices?.[0]?.delta;
+
+                if (!delta) continue;
+
+                // Handle reasoning content (o1 models)
+                if (delta.reasoning_content) {
+                  yield {
+                    type: 'thinking_delta',
+                    content: delta.reasoning_content
+                  };
+                }
+                // Handle regular text content
+                else if (delta.content) {
+                  yield delta.content;
                 }
               } catch {
                 // Ignore parse errors

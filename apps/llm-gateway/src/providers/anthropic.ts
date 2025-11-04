@@ -20,7 +20,12 @@ export class AnthropicProvider extends BaseProvider {
   stream(
     messages: Array<MessageWithAttachments>,
     model: string,
-    options?: { max_tokens?: number; temperature?: number }
+    options?: {
+      max_tokens?: number;
+      temperature?: number;
+      enableThinking?: boolean;
+      thinkingBudget?: number;
+    }
   ): ProviderStreamResult {
     const pool = this.pool;
     return {
@@ -29,25 +34,43 @@ export class AnthropicProvider extends BaseProvider {
         const systemMessage = messages.find((m) => m.role === 'system');
         const conversationMessages = messages.filter((m) => m.role !== 'system');
 
+        // Build request body
+        const body: any = {
+          model,
+          messages: conversationMessages.map((m) => ({
+            role: m.role === 'assistant' ? 'assistant' : 'user',
+            content: m.content,
+          })),
+          system: systemMessage?.content,
+          stream: true,
+          max_tokens: options?.max_tokens,
+          temperature: options?.temperature,
+        };
+
+        // Enable extended thinking for supported models
+        if (options?.enableThinking && (model.includes('sonnet') || model.includes('opus'))) {
+          body.thinking = {
+            type: "enabled",
+            budget_tokens: options.thinkingBudget || 10000
+          };
+        }
+
+        const headers: Record<string, string> = {
+          'Content-Type': 'application/json',
+          'x-api-key': process.env.ANTHROPIC_API_KEY || '',
+          'anthropic-version': '2023-06-01',
+        };
+
+        // Add extended thinking beta header if enabled
+        if (options?.enableThinking) {
+          headers['anthropic-beta'] = 'extended-thinking-2024-12-12';
+        }
+
         const response = await pool.request({
           path: '/v1/messages',
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': process.env.ANTHROPIC_API_KEY || '',
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model,
-            messages: conversationMessages.map((m) => ({
-              role: m.role === 'assistant' ? 'assistant' : 'user',
-              content: m.content,
-            })),
-            system: systemMessage?.content,
-            stream: true,
-            max_tokens: options?.max_tokens,
-            temperature: options?.temperature,
-          }),
+          headers,
+          body: JSON.stringify(body),
         });
 
         if (response.statusCode !== 200) {
@@ -72,7 +95,27 @@ export class AnthropicProvider extends BaseProvider {
               }
               try {
                 const parsed = JSON.parse(data);
-                if (parsed.type === 'content_block_delta') {
+
+                // Handle thinking block start
+                if (parsed.type === 'content_block_start' &&
+                    parsed.content_block?.type === 'thinking') {
+                  yield { type: 'thinking_start' };
+                }
+                // Handle thinking content streaming
+                else if (parsed.type === 'content_block_delta' &&
+                         parsed.delta?.type === 'thinking_delta') {
+                  yield {
+                    type: 'thinking_delta',
+                    content: parsed.delta.thinking || ''
+                  };
+                }
+                // Handle thinking block end
+                else if (parsed.type === 'content_block_stop' &&
+                         parsed.content_block?.type === 'thinking') {
+                  yield { type: 'thinking_end' };
+                }
+                // Handle regular text content
+                else if (parsed.type === 'content_block_delta') {
                   const content = parsed.delta?.text;
                   if (content) {
                     yield content;

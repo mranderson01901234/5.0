@@ -56,7 +56,12 @@ export class GoogleProvider extends BaseProvider {
   async stream(
     messages: Array<MessageWithAttachments>,
     model: string,
-    options?: { max_tokens?: number; temperature?: number }
+    options?: {
+      max_tokens?: number;
+      temperature?: number;
+      enableThinking?: boolean;
+      thinkingBudget?: number;
+    }
   ): Promise<ProviderStreamResult> {
     const pool = this.pool;
     const apiKey = process.env.GOOGLE_API_KEY || '';
@@ -133,11 +138,19 @@ export class GoogleProvider extends BaseProvider {
             temperature: options?.temperature,
           },
         };
-        
+
         // Only include systemInstruction if we have system messages
         if (systemInstruction) {
           requestBody.systemInstruction = {
             parts: [{ text: systemInstruction }],
+          };
+        }
+
+        // Enable thinking mode for Gemini (experimental feature)
+        if (options?.enableThinking) {
+          requestBody.thinkingConfig = {
+            thinkingMode: 'THINKING_MODE_ENABLED',
+            maxThinkingTokens: options.thinkingBudget || 10000
           };
         }
         
@@ -184,6 +197,18 @@ export class GoogleProvider extends BaseProvider {
               // Format 1: candidates array with content.parts
               if (parsed.candidates && Array.isArray(parsed.candidates)) {
                 for (const candidate of parsed.candidates) {
+                  // Check for thinking content (if thinking mode enabled)
+                  if (candidate.thinking?.parts) {
+                    for (const part of candidate.thinking.parts) {
+                      if (part.text) {
+                        yieldedAny = true;
+                        yield {
+                          type: 'thinking_delta',
+                          content: part.text
+                        };
+                      }
+                    }
+                  }
                   // Check content.parts (complete response)
                   if (candidate.content?.parts) {
                     for (const part of candidate.content.parts) {

@@ -168,71 +168,23 @@ export function useChatStream(){
         }
       }
 
-      // Generate contextual thinking steps
-      const thinkingEngine = getThinkingEngine();
-      let thinkingStream;
+      // Real thinking will come from backend via thinking_step events
+      // No more manufactured thinking - LLM provides its own reasoning
       let baseMessageForDots: string | null = null;
-      
+
       if (imageIntentDetected) {
-        // Force image category for thinking steps
-        // We'll manually create image thinking steps since patternMatcher might not catch it
-        const baseSteps = [
-          { text: 'Analyzing image requirements...', duration: 0, depth: 0 },
-          { text: 'Processing visual details...', duration: 0, depth: 0 },
-          { text: 'Preparing image generation...', duration: 0, depth: 1 },
-          { text: 'Rendering image...', duration: 0, depth: 0 },
-        ];
-        thinkingStream = {
-          steps: baseSteps.map((step, index) => ({
-            ...step,
-            duration: index === 0 ? 300 : index === baseSteps.length - 1 ? 500 : 400,
-          })),
-          totalDuration: 1500,
-          context: {
-            category: 'image' as const,
-            complexity: 'moderate' as const,
-            keywords: [],
-            entities: [],
-            intent: 'create',
-          },
-        };
-        
         // Set placeholder message for image generation (without dots initially)
         // This will be immediately visible and then animated dots will start
         const basePlaceholderMessage = generateImageResponseMessage(text);
         state.patchAssistant(basePlaceholderMessage);
         // Store the base message for the animated dots interval
         baseMessageForDots = basePlaceholderMessage;
-      } else {
-        thinkingStream = thinkingEngine.generateThinking(text);
       }
-
-      // Add thinking steps progressively
-      let thinkingStepIndex = 0;
-      const addThinkingSteps = () => {
-        if (thinkingStepIndex < thinkingStream.steps.length) {
-          const step = thinkingStream.steps[thinkingStepIndex];
-          if (step) {
-            state.addThinkingStep(step.text);
-            thinkingStepIndex++;
-
-            // Schedule next step
-            if (thinkingStepIndex < thinkingStream.steps.length) {
-              setTimeout(addThinkingSteps, step.duration);
-            }
-          }
-        }
-      };
-
-      // Start showing thinking steps immediately
-      setTimeout(addThinkingSteps, 100);
 
       log.info('[useChatStream] Started stream', {
         threadId: newThreadId,
         assistantId: assistant.id,
         userMessage: text.substring(0, 50),
-        thinkingCategory: thinkingStream.context.category,
-        thinkingSteps: thinkingStream.steps.length
       });
       
       // Declare variables outside try block for cleanup in finally
