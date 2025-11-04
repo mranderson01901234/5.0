@@ -6,6 +6,12 @@
 import type { DatabaseConnection } from './db.js';
 import type { Memory } from '@llm-gateway/shared';
 import { pino } from 'pino';
+import { preprocessQuery, getSearchTerms } from './query-preprocessor.js';
+import { filterStopWords } from './stopwords.js';
+import { FTSSync } from './ftsSync.js';
+import { calculateRelevanceScore, sortByRelevance } from './relevance-scorer.js';
+import type { ExpansionMode } from './synonyms.js';
+import { getSemanticThreshold, getHybridWeights, shouldFilterMemory } from './synonyms.js';
 
 const logger = pino({ name: 'vector-search' });
 
@@ -116,15 +122,22 @@ export async function hybridSearch(
     keywordWeight?: number;
     deadlineMs?: number;
     threadId?: string;
+    expansionMode?: ExpansionMode;
   } = {}
 ): Promise<Memory[]> {
   const {
     maxItems = 5,
-    semanticWeight = 0.7,
-    keywordWeight = 0.3,
+    semanticWeight: providedSemanticWeight,
+    keywordWeight: providedKeywordWeight,
     deadlineMs = 200,
     threadId,
+    expansionMode = 'normal',
   } = options;
+
+  // Get weights based on expansion mode (override if explicitly provided)
+  const weights = getHybridWeights(expansionMode);
+  const semanticWeight = providedSemanticWeight !== undefined ? providedSemanticWeight : weights.semanticWeight;
+  const keywordWeight = providedKeywordWeight !== undefined ? providedKeywordWeight : weights.keywordWeight;
 
   const startTime = Date.now();
   const results = new Map<string, { memory: Memory; semanticScore: number; keywordScore: number; combinedScore: number }>();
@@ -132,9 +145,26 @@ export async function hybridSearch(
   // Semantic search (if embedding available)
   if (queryEmbedding) {
     try {
-      const semanticResults = findSimilarMemories(db, userId, queryEmbedding, maxItems * 2, 0.5); // Lower threshold for more candidates
+      // Get semantic threshold based on expansion mode
+      const semanticThreshold = getSemanticThreshold(expansionMode);
+      const semanticResults = findSimilarMemories(db, userId, queryEmbedding, maxItems * 2, semanticThreshold);
 
       for (const { memory, similarity } of semanticResults) {
+        // In strict mode, filter out memories without keyword matches
+        // This prevents semantic-only matches from appearing in strict mode
+        if (expansionMode === 'strict' && query && query.trim()) {
+          const processed = preprocessQuery(query);
+          const searchTerms = getSearchTerms(processed, 10);
+          if (shouldFilterMemory(memory, searchTerms, expansionMode)) {
+            logger.debug({ 
+              memoryId: memory.id.substring(0, 8),
+              query,
+              reason: 'no_keyword_match'
+            }, 'Filtering memory in strict mode (no keyword match)');
+            continue; // Skip this memory
+          }
+        }
+        
         const existing = results.get(memory.id);
         if (!existing || existing.semanticScore < similarity) {
           results.set(memory.id, {
@@ -146,46 +176,190 @@ export async function hybridSearch(
         }
       }
 
-      logger.debug({ count: semanticResults.length }, 'Semantic search completed');
+      logger.debug({ 
+        count: semanticResults.length,
+        expansionMode,
+        semanticThreshold 
+      }, 'Semantic search completed');
     } catch (error: any) {
       logger.warn({ error: error.message }, 'Semantic search failed, continuing with keyword only');
     }
   }
 
-  // Keyword search (existing implementation)
+  // Keyword search (with preprocessing and FTS5)
   if (query && query.trim()) {
     try {
-      const commonWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should', 'could', 'what', 'when', 'where', 'why', 'how', 'who', 'which', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them']);
-      const words = query.toLowerCase().match(/\b\w{2,}\b/g) || [];
-      const queryKeywords = words.filter(w => !commonWords.has(w));
-
-      if (queryKeywords.length > 0) {
-        // Build keyword relevance query
-        const keywordConditions = queryKeywords.map(() => `(CASE WHEN LOWER(content) LIKE ? THEN 1 ELSE 0 END)`);
-        const relevanceScore = keywordConditions.join(' + ');
+      // Preprocess query to normalize and extract phrases/keywords
+      const processed = preprocessQuery(query);
+      const searchTerms = getSearchTerms(processed, 10); // Limit to top 10 terms
+      
+      if (searchTerms.length === 0) {
+        logger.debug({ originalQuery: query }, 'No searchable terms after preprocessing');
+        // Fallback to original query if preprocessing removed everything
+        const words = query.toLowerCase().match(/\b\w{2,}\b/g) || [];
+        const queryKeywords = filterStopWords(words, {
+          isQuestion: false,
+          preservePhrases: false,
+        });
         
-        let sqlQuery = `
-          SELECT *, (${relevanceScore}) as relevance_score
-          FROM memories
-          WHERE userId = ? AND deletedAt IS NULL
-        `;
+        if (queryKeywords.length > 0) {
+          // Use original keyword extraction as fallback
+          const keywordConditions = queryKeywords.map(() => `(CASE WHEN LOWER(content) LIKE ? THEN 1 ELSE 0 END)`);
+          const relevanceScore = keywordConditions.join(' + ');
+          
+          let sqlQuery = `
+            SELECT *, (${relevanceScore}) as relevance_score
+            FROM memories
+            WHERE userId = ? AND deletedAt IS NULL
+          `;
 
-        const params: any[] = [];
-        
-        // Add LIKE params for relevance calculation
-        queryKeywords.forEach(keyword => params.push(`%${keyword}%`));
-        params.push(userId);
+          const params: any[] = [];
+          
+          queryKeywords.forEach(keyword => params.push(`%${keyword}%`));
+          params.push(userId);
 
-        // Add threadId filter if provided
-        if (threadId) {
-          sqlQuery += ' AND threadId = ?';
-          params.push(threadId);
+          if (threadId) {
+            sqlQuery += ' AND threadId = ?';
+            params.push(threadId);
+          }
+
+          sqlQuery += ` ORDER BY relevance_score DESC, updatedAt DESC LIMIT ?`;
+          params.push(maxItems * 2);
+
+          const keywordMemories = db.prepare(sqlQuery).all(...params) as Array<Memory & { relevance_score: number }>;
+
+          const maxKeywordScore = keywordMemories.length > 0 ? Math.max(...keywordMemories.map(m => m.relevance_score || 0)) : 1;
+          
+          for (const mem of keywordMemories) {
+            const normalizedKeywordScore = maxKeywordScore > 0 ? (mem.relevance_score || 0) / maxKeywordScore : 0;
+            
+            const existing = results.get(mem.id);
+            if (!existing) {
+              results.set(mem.id, {
+                memory: mem as Memory,
+                semanticScore: 0,
+                keywordScore: normalizedKeywordScore,
+                combinedScore: 0,
+              });
+            } else {
+              existing.keywordScore = normalizedKeywordScore;
+            }
+          }
+          
+          logger.debug({ count: keywordMemories.length }, 'Keyword search completed (fallback)');
+        } else {
+          logger.debug('No keywords available after fallback');
         }
+      } else {
+        // Try FTS5 search first (better phrase matching and relevance)
+        const ftsSync = new FTSSync(db);
+        const health = ftsSync.getIndexHealth();
+        
+        let keywordMemories: Array<Memory & { relevance_score?: number }> = [];
+        let usedFTS5 = false;
+        
+        if (health.isHealthy && (processed.phrases.length > 0 || processed.keywords.length > 0)) {
+          try {
+            // Build FTS5 query
+            const ftsQuery = ftsSync.buildFTSQuery(processed.phrases, processed.keywords);
+            
+            if (ftsQuery.trim()) {
+              // Search using FTS5
+              const ftsResults = ftsSync.search(ftsQuery, userId, maxItems * 3, threadId);
+              
+              if (ftsResults.length > 0) {
+                usedFTS5 = true;
+                
+                // Get memory IDs from FTS results
+                const memoryIds = ftsResults.map(r => r.id);
+                
+                // Fetch full memory records
+                const placeholders = memoryIds.map(() => '?').join(',');
+                let sqlQuery = `
+                  SELECT * FROM memories
+                  WHERE id IN (${placeholders}) AND deletedAt IS NULL
+                `;
+                
+                const params: any[] = [...memoryIds];
+                sqlQuery += ` ORDER BY updatedAt DESC LIMIT ?`;
+                params.push(maxItems * 2);
+                
+                keywordMemories = db.prepare(sqlQuery).all(...params) as Array<Memory & { relevance_score?: number }>;
+                
+                // Add FTS scores to memories
+                const scoreMap = new Map(ftsResults.map(r => [r.id, r.score]));
+                keywordMemories.forEach(mem => {
+                  mem.relevance_score = scoreMap.get(mem.id) || 0;
+                });
+                
+                // Sort by FTS score (preserve FTS ranking)
+                keywordMemories.sort((a, b) => {
+                  const scoreA = a.relevance_score || 0;
+                  const scoreB = b.relevance_score || 0;
+                  return scoreB - scoreA; // Higher score = better
+                });
+                
+                logger.debug({ 
+                  count: keywordMemories.length,
+                  ftsQuery,
+                  phrases: processed.phrases.length,
+                  keywords: processed.keywords.length
+                }, 'FTS5 search completed');
+              }
+            }
+          } catch (error: any) {
+            logger.warn({ 
+              error: error.message,
+              query 
+            }, 'FTS5 search failed, falling back to LIKE');
+          }
+        }
+        
+        // Fallback to LIKE-based search if FTS5 unavailable or returned no results
+        if (!usedFTS5 || keywordMemories.length === 0) {
+          logger.debug('Using LIKE-based search (FTS5 fallback)');
+          
+          // Build keyword relevance query with phrases and keywords
+          // Phrases get higher weight (2x) than individual keywords
+          const keywordConditions: string[] = [];
+          const params: any[] = [];
+          
+          for (const term of searchTerms) {
+            const isPhrase = processed.phrases.includes(term);
+            const weight = isPhrase ? 2 : 1; // Phrases are worth 2x
+            
+            // For phrases, use exact phrase matching
+            if (isPhrase) {
+              keywordConditions.push(`(CASE WHEN LOWER(content) LIKE ? THEN ${weight} ELSE 0 END)`);
+              params.push(`%${term}%`);
+            } else {
+              // For keywords, use word boundary matching
+              keywordConditions.push(`(CASE WHEN LOWER(content) LIKE ? THEN ${weight} ELSE 0 END)`);
+              params.push(`%${term}%`);
+            }
+          }
+          
+          const relevanceScore = keywordConditions.join(' + ');
+          
+          let sqlQuery = `
+            SELECT *, (${relevanceScore}) as relevance_score
+            FROM memories
+            WHERE userId = ? AND deletedAt IS NULL
+          `;
 
-        sqlQuery += ` ORDER BY relevance_score DESC, updatedAt DESC LIMIT ?`;
-        params.push(maxItems * 2);
+          params.push(userId);
 
-        const keywordMemories = db.prepare(sqlQuery).all(...params) as Array<Memory & { relevance_score: number }>;
+          // Add threadId filter if provided
+          if (threadId) {
+            sqlQuery += ' AND threadId = ?';
+            params.push(threadId);
+          }
+
+          sqlQuery += ` ORDER BY relevance_score DESC, updatedAt DESC LIMIT ?`;
+          params.push(maxItems * 2);
+
+          keywordMemories = db.prepare(sqlQuery).all(...params) as Array<Memory & { relevance_score?: number }>;
+        }
 
         // Normalize keyword scores (0-1)
         const maxKeywordScore = keywordMemories.length > 0 ? Math.max(...keywordMemories.map(m => m.relevance_score || 0)) : 1;
@@ -206,7 +380,14 @@ export async function hybridSearch(
           }
         }
 
-        logger.debug({ count: keywordMemories.length }, 'Keyword search completed');
+        logger.debug({ 
+          count: keywordMemories.length,
+          originalQuery: query,
+          processedTerms: searchTerms.length,
+          phrases: processed.phrases.length,
+          keywords: processed.keywords.length,
+          usedFTS5
+        }, 'Keyword search completed');
       }
     } catch (error: any) {
       logger.warn({ error: error.message }, 'Keyword search failed');
@@ -220,10 +401,38 @@ export async function hybridSearch(
       (entry.keywordScore * keywordWeight);
   }
 
-  // Sort by combined score and apply tier/recency prioritization
+  // Get processed query for relevance scoring
+  const processed = query ? preprocessQuery(query) : null;
+  
+  // Apply enhanced relevance scoring if query available
+  if (processed && query && query.trim()) {
+    const baseScores = new Map<string, number>();
+    for (const entry of results.values()) {
+      baseScores.set(entry.memory.id, entry.combinedScore);
+    }
+    
+    // Apply enhanced relevance scoring
+    for (const entry of results.values()) {
+      const enhancedScore = calculateRelevanceScore(
+        entry.memory,
+        processed,
+        entry.combinedScore,
+        {
+          boostPhrases: true,
+          boostPosition: true,
+          boostTier: true,
+          boostPriority: true,
+          boostRecency: true,
+        }
+      );
+      entry.combinedScore = enhancedScore;
+    }
+  }
+
+  // Sort by combined score (now includes enhanced relevance)
   const sortedResults = Array.from(results.values())
     .sort((a, b) => {
-      // Primary: combined score
+      // Primary: combined score (with enhanced relevance)
       if (Math.abs(a.combinedScore - b.combinedScore) > 0.01) {
         return b.combinedScore - a.combinedScore;
       }
@@ -274,7 +483,8 @@ export function keywordOnlySearch(
   userId: string,
   query: string,
   maxItems: number = 5,
-  threadId?: string
+  threadId?: string,
+  expansionMode: ExpansionMode = 'normal'
 ): Memory[] {
   if (!query || !query.trim()) {
     // No query - return recent memories
@@ -295,11 +505,11 @@ export function keywordOnlySearch(
     return db.prepare(sqlQuery).all(...params) as Memory[];
   }
 
-  const commonWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should', 'could', 'what', 'when', 'where', 'why', 'how', 'who', 'which', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them']);
-  const words = query.toLowerCase().match(/\b\w{2,}\b/g) || [];
-  const queryKeywords = words.filter(w => !commonWords.has(w));
+  // Preprocess query to normalize and extract phrases/keywords
+  const processed = preprocessQuery(query);
+  const searchTerms = getSearchTerms(processed, 10); // Limit to top 10 terms
 
-  if (queryKeywords.length === 0) {
+  if (searchTerms.length === 0) {
     // No keywords - return recent memories
     let sqlQuery = `
       SELECT * FROM memories
@@ -318,8 +528,128 @@ export function keywordOnlySearch(
     return db.prepare(sqlQuery).all(...params) as Memory[];
   }
 
-  // Build keyword relevance query
-  const keywordConditions = queryKeywords.map(() => `(CASE WHEN LOWER(content) LIKE ? THEN 1 ELSE 0 END)`);
+  // Try FTS5 search first (better phrase matching and relevance)
+  const ftsSync = new FTSSync(db);
+  const health = ftsSync.getIndexHealth();
+  
+  // Rebuild index if out of sync (but only if significantly out of sync to avoid frequent rebuilds)
+  if (!health.isHealthy && health.outOfSync > 5) {
+    logger.warn({ outOfSync: health.outOfSync }, 'FTS5 index out of sync, rebuilding...');
+    ftsSync.rebuildIndex();
+  }
+  
+  if (health.isHealthy && (processed.phrases.length > 0 || processed.keywords.length > 0)) {
+    try {
+      // Build FTS5 query
+      const ftsQuery = ftsSync.buildFTSQuery(processed.phrases, processed.keywords);
+      
+      if (ftsQuery.trim()) {
+        // Search using FTS5
+        const ftsResults = ftsSync.search(ftsQuery, userId, maxItems * 2, threadId);
+        
+        if (ftsResults.length > 0) {
+          // Get memory IDs from FTS results
+          const memoryIds = ftsResults.map(r => r.id);
+          
+          // Fetch full memory records
+          const placeholders = memoryIds.map(() => '?').join(',');
+          let sqlQuery = `
+            SELECT * FROM memories
+            WHERE id IN (${placeholders}) AND deletedAt IS NULL
+          `;
+          
+          const params: any[] = [...memoryIds];
+          
+          // Add recency boost and tier ordering
+          const recencyBoost = `CASE WHEN (updatedAt > (strftime('%s', 'now') * 1000 - 86400000)) THEN 0 ELSE 1 END`;
+          sqlQuery += ` ORDER BY ${threadId ? 'CASE WHEN threadId = ? THEN 0 ELSE 1 END, ' : ''}${recencyBoost}, updatedAt DESC,
+            CASE tier
+              WHEN 'TIER1' THEN 1
+              WHEN 'TIER2' THEN 2
+              WHEN 'TIER3' THEN 3
+              ELSE 4
+            END, priority DESC LIMIT ?`;
+          
+          if (threadId) {
+            params.push(threadId);
+          }
+          params.push(maxItems);
+          
+          const memories = db.prepare(sqlQuery).all(...params) as Memory[];
+          
+          // Apply enhanced relevance scoring
+          const scoreMap = new Map(ftsResults.map(r => [r.id, r.score]));
+          const baseScores = new Map<string, number>();
+          memories.forEach(mem => {
+            baseScores.set(mem.id, scoreMap.get(mem.id) || 0);
+          });
+          
+          // Apply enhanced relevance scoring
+          for (const memory of memories) {
+            const baseScore = baseScores.get(memory.id) || 0;
+            const enhancedScore = calculateRelevanceScore(
+              memory,
+              processed,
+              baseScore,
+              {
+                boostPhrases: true,
+                boostPosition: true,
+                boostTier: true,
+                boostPriority: true,
+                boostRecency: true,
+              }
+            );
+            baseScores.set(memory.id, enhancedScore);
+          }
+          
+          // Sort by enhanced score
+          memories.sort((a, b) => {
+            const scoreA = baseScores.get(a.id) || 0;
+            const scoreB = baseScores.get(b.id) || 0;
+            return scoreB - scoreA; // Higher score = better
+          });
+          
+          logger.debug({ 
+            count: memories.length,
+            ftsQuery,
+            phrases: processed.phrases.length,
+            keywords: processed.keywords.length
+          }, 'FTS5 search completed with enhanced relevance');
+          
+          return memories.slice(0, maxItems);
+        }
+      }
+    } catch (error: any) {
+      logger.warn({ 
+        error: error.message,
+        query 
+      }, 'FTS5 search failed, falling back to LIKE');
+    }
+  }
+  
+  // Fallback to LIKE-based search if FTS5 unavailable or fails
+  logger.debug('Using LIKE-based search (FTS5 fallback)');
+  
+  // Build keyword relevance query with phrases and keywords
+  // Phrases get higher weight (2x) than individual keywords
+  const keywordConditions: string[] = [];
+  const params: any[] = [];
+  
+  for (const term of searchTerms) {
+    const isPhrase = processed.phrases.includes(term);
+    const weight = isPhrase ? 2 : 1; // Phrases are worth 2x
+    
+    // For phrases, use exact phrase matching
+    if (isPhrase) {
+      keywordConditions.push(`(CASE WHEN LOWER(content) LIKE ? THEN ${weight} ELSE 0 END)`);
+      params.push(`%${term}%`);
+    } else {
+      // For keywords, use word boundary matching
+      keywordConditions.push(`(CASE WHEN LOWER(content) LIKE ? THEN ${weight} ELSE 0 END)`);
+      params.push(`%${term}%`);
+    }
+  }
+  
   const relevanceScore = keywordConditions.join(' + ');
   
   let sqlQuery = `
@@ -328,10 +658,6 @@ export function keywordOnlySearch(
     WHERE userId = ? AND deletedAt IS NULL
   `;
 
-  const params: any[] = [];
-  
-  // Add LIKE params for relevance calculation
-  queryKeywords.forEach(keyword => params.push(`%${keyword}%`));
   params.push(userId);
 
   if (threadId) {
@@ -339,6 +665,7 @@ export function keywordOnlySearch(
     params.push(threadId);
   }
 
+  // Get results with basic relevance scoring
   const recencyBoost = `CASE WHEN (updatedAt > (strftime('%s', 'now') * 1000 - 86400000)) THEN 0 ELSE 1 END`;
   
   sqlQuery += ` ORDER BY ${threadId ? 'CASE WHEN threadId = ? THEN 0 ELSE 1 END, ' : ''}${recencyBoost}, updatedAt DESC, relevance_score DESC, 
@@ -352,8 +679,50 @@ export function keywordOnlySearch(
   if (threadId) {
     params.push(threadId);
   }
-  params.push(maxItems);
+  params.push(maxItems * 2); // Get more for enhanced scoring
 
-  return db.prepare(sqlQuery).all(...params) as Memory[];
+  let memories = db.prepare(sqlQuery).all(...params) as Array<Memory & { relevance_score?: number }>;
+  
+  // Apply enhanced relevance scoring
+  const baseScores = new Map<string, number>();
+  memories.forEach(mem => {
+    baseScores.set(mem.id, (mem.relevance_score || 0) / 10); // Normalize base score
+  });
+  
+  // Apply enhanced relevance scoring
+  for (const memory of memories) {
+    const baseScore = baseScores.get(memory.id) || 0;
+    const enhancedScore = calculateRelevanceScore(
+      memory,
+      processed,
+      baseScore,
+      {
+        boostPhrases: true,
+        boostPosition: true,
+        boostTier: true,
+        boostPriority: true,
+        boostRecency: true,
+      }
+    );
+    baseScores.set(memory.id, enhancedScore);
+  }
+  
+  // Sort by enhanced score
+  memories = sortByRelevance(memories, processed, baseScores, {
+    boostPhrases: true,
+    boostPosition: true,
+    boostTier: true,
+    boostPriority: true,
+    boostRecency: true,
+  });
+  
+  logger.debug({ 
+    count: memories.length,
+    searchType: 'keyword-only',
+    phrases: processed.phrases.length,
+    keywords: processed.keywords.length
+  }, 'Keyword-only search completed with enhanced relevance');
+  
+  return memories.slice(0, maxItems);
 }
 

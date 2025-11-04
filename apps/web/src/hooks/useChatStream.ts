@@ -6,6 +6,14 @@ import { handleApiError } from '@/utils/handleApiError';
 import { log } from '@/utils/logger';
 import type { ApiMessage } from '@/types/api';
 import { getThinkingEngine } from '@/lib/thinking/ThinkingEngine';
+import { classifyArtifactIntent, classifyArtifactIntentViaAPI, type ArtifactIntent } from '@/utils/classifyArtifactIntent';
+import { autoDetectTableFormat } from '@/utils/tableParser';
+import { useArtifactStore } from '@/store/artifactStore';
+import { logEvent } from '@/lib/eventLogger';
+import { useUser } from '@clerk/clerk-react';
+import { scrollArtifactIntoView } from '@/utils/scrollIntoViewAnchor';
+import { extractFileText } from '@/services/fileExtraction';
+import { generateImageResponseMessage, waitForImageArtifact, getAnimatedDots } from '@/utils/imageResponsePrompts';
 
 export type StreamEvent =
   | { type: 'open' }
@@ -29,10 +37,12 @@ function generateTitle(msg: string): string {
 
 export function useChatStream(){
   const { getToken } = useAuth();
+  const { user } = useUser();
+  const userId = user?.id || '';
   
   return {
-    async send(text:string){
-      if(!text.trim()) return;
+    async send(text:string, attachments?: Array<{ id: string; filename: string; mimeType: string; size: number; url?: string }>){
+      if(!text.trim() && (!attachments || attachments.length === 0)) return;
       
       const state = useChatStore.getState();
       const conversations = state.conversations;
@@ -68,7 +78,49 @@ export function useChatStream(){
         });
       }
       
-      const user = { id:nanoid(), role:"user" as const, content:text };
+      const user = { 
+        id:nanoid(), 
+        role:"user" as const, 
+        content:text.trim() || '', 
+        ...(attachments && attachments.length > 0 ? { attachments } : {})
+      };
+      
+      // Extract text from document attachments and append to message content
+      let enrichedContent = text.trim() || '';
+      if (attachments && attachments.length > 0) {
+        const token = await getToken();
+        const extractedTexts: string[] = [];
+        
+        for (const attachment of attachments) {
+          // Check if file type supports text extraction
+          const canExtract = attachment.mimeType === 'application/pdf' ||
+                            attachment.mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' ||
+                            attachment.mimeType === 'text/plain' ||
+                            attachment.mimeType.startsWith('text/');
+          
+          if (canExtract) {
+            try {
+              const extracted = await extractFileText(attachment.id, token || undefined);
+              if (extracted.extractedText.trim()) {
+                extractedTexts.push(`\n\n[File: ${attachment.filename}]\n${extracted.extractedText.trim()}`);
+              }
+            } catch (error) {
+              log.warn(`[useChatStream] Failed to extract text from ${attachment.filename}`, error);
+              // Continue with other files even if one fails
+            }
+          }
+        }
+        
+        if (extractedTexts.length > 0) {
+          enrichedContent = (enrichedContent ? enrichedContent + '\n\n' : '') + extractedTexts.join('\n\n');
+        }
+      }
+      
+      // Update user message with enriched content
+      const enrichedUser = {
+        ...user,
+        content: enrichedContent || user.content,
+      };
       
       // Auto-generate title from first user message
       if(newItems.length === 0) {
@@ -80,28 +132,94 @@ export function useChatStream(){
         useChatStore.setState({ conversations: updatedConvs });
       }
       
-      state.add(user);
+      state.add(enrichedUser);
       const assistant = { id:nanoid(), role:"assistant" as const, content:"" };
       state.add(assistant);
       state.start();
       const t0 = performance.now();
       state.setTTFB(undefined);
 
+      // Early detection of image intent
+      let imageIntentDetected = false;
+      let earlyImageIntent: ArtifactIntent | null = null;
+      try {
+        const token = await getToken();
+        if (userId && token) {
+          // Try to detect image intent early using API
+          earlyImageIntent = await classifyArtifactIntentViaAPI(text, newThreadId, userId, token);
+          if (earlyImageIntent.shouldCreate && earlyImageIntent.type === 'image') {
+            imageIntentDetected = true;
+            log.info('[useChatStream] Early image intent detected', {
+              confidence: earlyImageIntent.confidence,
+              userText: text.substring(0, 100),
+            });
+          }
+        }
+      } catch (error) {
+        // Fallback to local classification
+        const localIntent = classifyArtifactIntent(text);
+        if (localIntent.shouldCreate && localIntent.type === 'image') {
+          imageIntentDetected = true;
+          earlyImageIntent = localIntent;
+          log.info('[useChatStream] Early image intent detected (local)', {
+            confidence: localIntent.confidence,
+            userText: text.substring(0, 100),
+          });
+        }
+      }
+
       // Generate contextual thinking steps
       const thinkingEngine = getThinkingEngine();
-      const thinkingStream = thinkingEngine.generateThinking(text);
+      let thinkingStream;
+      let baseMessageForDots: string | null = null;
+      
+      if (imageIntentDetected) {
+        // Force image category for thinking steps
+        // We'll manually create image thinking steps since patternMatcher might not catch it
+        const baseSteps = [
+          { text: 'Analyzing image requirements...', duration: 0, depth: 0 },
+          { text: 'Processing visual details...', duration: 0, depth: 0 },
+          { text: 'Preparing image generation...', duration: 0, depth: 1 },
+          { text: 'Rendering image...', duration: 0, depth: 0 },
+        ];
+        thinkingStream = {
+          steps: baseSteps.map((step, index) => ({
+            ...step,
+            duration: index === 0 ? 300 : index === baseSteps.length - 1 ? 500 : 400,
+          })),
+          totalDuration: 1500,
+          context: {
+            category: 'image' as const,
+            complexity: 'moderate' as const,
+            keywords: [],
+            entities: [],
+            intent: 'create',
+          },
+        };
+        
+        // Set placeholder message for image generation (without dots initially)
+        // This will be immediately visible and then animated dots will start
+        const basePlaceholderMessage = generateImageResponseMessage(text);
+        state.patchAssistant(basePlaceholderMessage);
+        // Store the base message for the animated dots interval
+        baseMessageForDots = basePlaceholderMessage;
+      } else {
+        thinkingStream = thinkingEngine.generateThinking(text);
+      }
 
       // Add thinking steps progressively
       let thinkingStepIndex = 0;
       const addThinkingSteps = () => {
         if (thinkingStepIndex < thinkingStream.steps.length) {
           const step = thinkingStream.steps[thinkingStepIndex];
-          state.addThinkingStep(step.text);
-          thinkingStepIndex++;
+          if (step) {
+            state.addThinkingStep(step.text);
+            thinkingStepIndex++;
 
-          // Schedule next step
-          if (thinkingStepIndex < thinkingStream.steps.length) {
-            setTimeout(addThinkingSteps, step.duration);
+            // Schedule next step
+            if (thinkingStepIndex < thinkingStream.steps.length) {
+              setTimeout(addThinkingSteps, step.duration);
+            }
           }
         }
       };
@@ -116,13 +234,101 @@ export function useChatStream(){
         thinkingCategory: thinkingStream.context.category,
         thinkingSteps: thinkingStream.steps.length
       });
+      
+      // Declare variables outside try block for cleanup in finally
+      let dotsInterval: NodeJS.Timeout | null = null;
+      let imageGenerationPromise: Promise<void> | null = null;
+      
       try {
-        const token = await getToken();
-        const currentState = useChatStore.getState();
-        const lastK = currentState.conversations.find(c => c.id === newThreadId)?.messages.slice(-10) || [];
-        const { firstAtGetter, stream } = await streamChat({ threadId: newThreadId, messages: lastK.concat(user) }, token || undefined);
+      const token = await getToken();
+      
+      // For image requests, start image generation immediately
+      if (imageIntentDetected) {
+        // Start animated dots - use the base message that was already set
+        let dotsFrame = 0;
+        const baseMessage = baseMessageForDots || generateImageResponseMessage(text);
+        // Remove the trailing "..." from base message - we'll animate dots instead
+        const messageWithoutDots = baseMessage.replace(/\.{3}\s*$/, '').trim();
+        dotsInterval = setInterval(() => {
+          dotsFrame++;
+          const dots = getAnimatedDots(dotsFrame);
+          // Update message with animated dots
+          state.patchAssistant(`${messageWithoutDots}${dots}`);
+        }, 500); // Update every 500ms
+        
+        // Start image generation in parallel
+        imageGenerationPromise = (async () => {
+          try {
+            const res = await fetch('/api/artifacts/image', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${token}`,
+              },
+              body: JSON.stringify({
+                threadId: newThreadId,
+                prompt: text,
+              }),
+            });
+
+            if (!res.ok) {
+              const errorBody = await res.json();
+              throw new Error(errorBody.error || 'Image generation API call failed');
+            }
+
+            const { artifactId } = await res.json();
+            
+            // Load artifacts
+            const artifactStore = useArtifactStore.getState();
+            await artifactStore.loadArtifacts(newThreadId, token || undefined);
+
+            // Wait for image artifact to appear with images loaded
+            log.info('[useChatStream] Waiting for image artifact to be ready', { artifactId });
+            await waitForImageArtifact(artifactId, newThreadId, 30000);
+            
+            // Clear dots animation
+            if (dotsInterval) {
+              clearInterval(dotsInterval);
+              dotsInterval = null;
+            }
+            
+            // Remove dots from message - keep just the base message without dots
+            const messageWithoutDots = baseMessage.replace(/\.{3}\s*$/, '').trim();
+            state.patchAssistant(messageWithoutDots);
+            
+            setTimeout(() => {
+              scrollArtifactIntoView(artifactId);
+            }, 300);
+
+            logEvent({
+              event: 'artifact_created',
+              type: 'image',
+              artifactId,
+              threadId: newThreadId,
+              confidence: earlyImageIntent?.confidence || 0.9,
+            });
+            
+            log.info('[useChatStream] Image artifact ready');
+          } catch (imageError) {
+            if (dotsInterval) {
+              clearInterval(dotsInterval);
+              dotsInterval = null;
+            }
+            log.error('[useChatStream] Failed to create image artifact.', { error: imageError });
+            // Remove dots
+            const messageWithoutDots = baseMessage.replace(/\.{3}\s*$/, '').trim();
+            state.patchAssistant(messageWithoutDots);
+          }
+        })();
+      }
+      
+      const currentState = useChatStore.getState();
+      // Get messages from store - user message was already added on line 83, so don't concat it again
+      const lastK = currentState.conversations.find(c => c.id === newThreadId)?.messages.slice(-10) || [];
+      const { firstAtGetter, stream } = await streamChat({ threadId: newThreadId, messages: lastK }, token || undefined);
         let gotPrimary=false;
         let hasResearchSummary = false;
+        let finalResponseText = ""; // Track final response for artifact detection
         
         for await (const {ev,data} of stream){
           // Debug: log all events
@@ -177,6 +383,8 @@ export function useChatStream(){
               if(lastMsg && lastMsg.role === "assistant") {
                 // Replace empty assistant message with web search summary
                 state.patchAssistant(summary);
+                // Track final response text for artifact detection
+                finalResponseText = summary;
                 hasResearchSummary = true;
                 state.setResearchThinking(false);
               } else {
@@ -186,44 +394,59 @@ export function useChatStream(){
               log.warn('[useChatStream] research_summary event received but no valid summary found', { data, dataType: typeof data });
             }
           } else if(ev==="delta"){
-            if(!gotPrimary){
-              const firstAt = firstAtGetter();
-              if(firstAt) {
-                const ttfbMs = firstAt - t0;
-                state.setTTFB(ttfbMs);
-                const frChip = useChatStore.getState().frChip;
-                if(ttfbMs > 400 && frChip){
-                  // Keep FR chip visible
-                } else {
-                  state.setFRChip(undefined);
-                }
-              }
-              gotPrimary=true;
+            // If image intent was detected early, completely suppress LLM delta responses
+            // The placeholder message with animated dots should stay visible
+            if (imageIntentDetected) {
+              // Ignore delta completely - don't update the message at all
+              // The animated dots interval is already updating the placeholder message
+              // Just track for artifact detection (but won't be used)
+              let deltaText = typeof data === 'string' ? data : (data?.text || data || "");
+              finalResponseText += deltaText;
+              // Don't call state.patchAssistant - keep placeholder visible
             } else {
-              state.setFRChip(undefined);
-            }
-            const currentMsgs = useChatStore.getState().conversations.find(c => c.id === newThreadId)?.messages || [];
-            const lastMsg = currentMsgs[currentMsgs.length - 1];
-            let deltaText = typeof data === 'string' ? data : (data?.text || data || "");
+              if(!gotPrimary){
+                const firstAt = firstAtGetter();
+                if(firstAt) {
+                  const ttfbMs = firstAt - t0;
+                  state.setTTFB(ttfbMs);
+                  const frChip = useChatStore.getState().frChip;
+                  if(ttfbMs > 400 && frChip){
+                    // Keep FR chip visible
+                  } else {
+                    state.setFRChip(undefined);
+                  }
+                }
+                gotPrimary=true;
+              } else {
+                state.setFRChip(undefined);
+              }
+              const currentMsgs = useChatStore.getState().conversations.find(c => c.id === newThreadId)?.messages || [];
+              const lastMsg = currentMsgs[currentMsgs.length - 1];
+              let deltaText = typeof data === 'string' ? data : (data?.text || data || "");
 
-            // Convert ugly bullets (L., numbers, box chars) to proper - bullets (with optional leading whitespace)
-            deltaText = deltaText.replace(/^\s*L\.\s+/gm, '- ');
-            deltaText = deltaText.replace(/^\s*\d+\.\s+/gm, '- ');
-            deltaText = deltaText.replace(/^\s*[└├│]\s*\.?\s*/gm, '- ');
+              // Convert ugly bullets (L., numbers, box chars) to proper - bullets (with optional leading whitespace)
+              deltaText = deltaText.replace(/^\s*L\.\s+/gm, '- ');
+              deltaText = deltaText.replace(/^\s*\d+\.\s+/gm, '- ');
+              deltaText = deltaText.replace(/^\s*[└├│]\s*\.?\s*/gm, '- ');
 
-            const currentContent = lastMsg?.content || "";
+              const currentContent = lastMsg?.content || "";
 
-            // Append delta naturally - no hard separators needed
-            // If there's existing content (from web search or ingestion context), the LLM should continue naturally
-            // or we append with a simple newline for natural flow
-            const separator = (hasResearchSummary && currentContent && currentContent.trim()) ? "\n\n" : "";
+              // Append delta naturally - no hard separators needed
+              // If there's existing content (from web search or ingestion context), the LLM should continue naturally
+              // or we append with a simple newline for natural flow
+              const separator = (hasResearchSummary && currentContent && currentContent.trim()) ? "\n\n" : "";
 
-            // Simple delta append - all formatting comes from LLM
-            state.patchAssistant(currentContent + separator + deltaText);
-            
-            // Reset flag after first delta
-            if (hasResearchSummary) {
-              hasResearchSummary = false;
+              // Simple delta append - all formatting comes from LLM
+              const updatedContent = currentContent + separator + deltaText;
+              state.patchAssistant(updatedContent);
+              
+              // Track final response text for artifact detection
+              finalResponseText = updatedContent;
+              
+              // Reset flag after first delta
+              if (hasResearchSummary) {
+                hasResearchSummary = false;
+              }
             }
           } else if(ev==="error"){
             // Handle error events from the stream
@@ -309,7 +532,162 @@ export function useChatStream(){
             } else {
               log.warn('[useChatStream] sources event received but no valid sources found', { data, dataType: typeof data });
             }
-          } else if(ev==="done"){ break; }
+          } else if(ev==="done"){
+            // For image requests, wait for image generation to complete before breaking
+            if (imageIntentDetected && imageGenerationPromise) {
+              await imageGenerationPromise;
+            }
+            break;
+          }
+        }
+
+        // After stream completes, check for artifact creation (only if not already handled)
+        try {
+          // Get final assistant message content
+          const finalState = useChatStore.getState();
+          const finalConv = finalState.conversations.find(c => c.id === newThreadId);
+          const assistantMsg = finalConv?.messages.find(m => m.role === "assistant" && m.id === assistant.id);
+          const responseContent = assistantMsg?.content || finalResponseText || "";
+
+          log.info('[useChatStream] Checking for artifact creation', {
+            threadId: newThreadId,
+            userText: text.substring(0, 100),
+            responseLength: responseContent.length,
+            userId: userId || 'none',
+          });
+
+          // Phase 4: Use gatekeeper API for classification (if not already detected early)
+          let intent: ArtifactIntent;
+          const authToken = await getToken();
+          if (imageIntentDetected && earlyImageIntent) {
+            // Use the early detected intent
+            intent = earlyImageIntent;
+            log.info('[useChatStream] Using early detected image intent', {
+              shouldCreate: intent.shouldCreate,
+              type: intent.type,
+              confidence: intent.confidence,
+              userText: text.substring(0, 100),
+            });
+          } else {
+            // Check again after stream completes (fallback)
+            intent = userId && authToken
+              ? await classifyArtifactIntentViaAPI(text, newThreadId, userId, authToken)
+              : classifyArtifactIntent(text, responseContent);
+
+            log.info('[useChatStream] Gatekeeper intent result', {
+              shouldCreate: intent.shouldCreate,
+              type: intent.type,
+              confidence: intent.confidence,
+              userText: text.substring(0, 100),
+            });
+          }
+
+          if (intent.shouldCreate && intent.type === 'image') {
+            // Image generation already handled earlier if imageIntentDetected
+            if (!imageIntentDetected) {
+              // Late detection - handle it here
+              log.info('[useChatStream] Image intent detected (late). Creating image artifact.');
+              // Note: This case shouldn't happen often since we detect early
+              // But handle it for completeness
+            }
+          } else if (intent.shouldCreate && intent.type === "table") {
+            // Extract table data from response
+            const tableData = autoDetectTableFormat(responseContent);
+
+            log.info('[useChatStream] Table parsing result', {
+              tableDataFound: tableData.length > 0,
+              rowCount: tableData.length,
+              columnCount: tableData[0]?.length || 0,
+              responsePreview: responseContent.substring(0, 500),
+            });
+
+            const firstRow = tableData[0];
+            if (tableData.length > 0 && firstRow && firstRow.length > 0) {
+              // Create table artifact with temp ID
+              const artifactStore = useArtifactStore.getState();
+              const artifact = artifactStore.createTableArtifact(tableData, newThreadId);
+
+              log.info('[useChatStream] Artifact created locally', {
+                artifactId: artifact.id,
+                threadId: newThreadId,
+                rows: tableData.length,
+                columns: tableData[0]?.length || 0,
+              });
+
+              // Artifacts show inline in chat - scroll into view after creation
+              console.log('[artifact] Created artifact (inline display)', artifact.id);
+              
+              // Scroll artifact card into view after a short delay to ensure DOM is ready
+              setTimeout(() => {
+                scrollArtifactIntoView(artifact.id);
+              }, 300);
+              
+              // Phase 4: Save artifact to backend and update pointer
+              // Note: saveArtifact() handles repointing internally, so we don't need to do it here
+              if (authToken) {
+                try {
+                  const saved = await artifactStore.saveArtifact(artifact, authToken);
+                  log.info('[useChatStream] Artifact saved to backend', { 
+                    oldId: artifact.id, 
+                    newId: saved?.id 
+                  });
+                  
+                  // Repoint is handled in artifactStore.saveArtifact() - no need to duplicate here
+                  if (saved?.id && saved.id !== artifact.id) {
+                    console.log('[autoopen] repoint currentArtifact to serverId', saved.id);
+                    // Scroll to new artifact ID after repoint
+                    setTimeout(() => {
+                      scrollArtifactIntoView(saved.id);
+                    }, 100);
+                  }
+                } catch (saveError: any) {
+                  log.error('[useChatStream] Failed to save artifact to backend', {
+                    error: saveError?.message,
+                    artifactId: artifact.id,
+                  });
+                  // Keep temp artifact selected; log only
+                }
+              } else {
+                log.warn('[useChatStream] No auth token, skipping backend save');
+              }
+
+              // Log telemetry event (already logged in saveArtifact, but keep for backward compatibility)
+              logEvent({
+                event: "artifact_created",
+                type: "table",
+                artifactId: artifact.id,
+                threadId: newThreadId,
+                rowCount: tableData.length,
+                columnCount: tableData[0]?.length || 0,
+                confidence: intent.confidence,
+              });
+
+              log.info('[useChatStream] Created table artifact successfully', {
+                artifactId: artifact.id,
+                threadId: newThreadId,
+                rows: tableData.length,
+                columns: tableData[0]?.length || 0,
+              });
+            } else {
+              log.warn('[useChatStream] Table intent detected but no valid table data found', {
+                intent,
+                responsePreview: responseContent.substring(0, 500),
+                tableDataLength: tableData.length,
+              });
+            }
+          } else {
+            log.debug('[useChatStream] No artifact creation needed', {
+              shouldCreate: intent.shouldCreate,
+              type: intent.type,
+            });
+          }
+        } catch (artifactError: any) {
+          // Don't fail the entire stream if artifact creation fails
+          log.error('[useChatStream] Failed to create artifact', {
+            error: artifactError?.message,
+            stack: artifactError?.stack,
+            userText: text.substring(0, 100),
+          });
         }
       } catch (err: unknown) {
         handleApiError(err, {
@@ -317,6 +695,10 @@ export function useChatStream(){
           fallbackMessage: 'Failed to send message.',
         });
       } finally {
+        // Clean up dots interval if still running
+        if (dotsInterval) {
+          clearInterval(dotsInterval);
+        }
         state.end();
       }
     }

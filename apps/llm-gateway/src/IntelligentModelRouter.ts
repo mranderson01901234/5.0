@@ -90,20 +90,20 @@ export class IntelligentModelRouter {
       latencyMs: 1200,
       qualityScore: 8.1
     },
-    'gemini-2.0-flash-exp': {
-      maxTokens: 8192,
+    'gemini-2.5-flash': {
+      maxTokens: 16384,
       contextWindow: 1000000,
-      costPer1kTokens: { input: 0.000075, output: 0.0003 },
-      strengths: ['large-context', 'multimodal', 'cost-efficiency'],
-      latencyMs: 1000,
-      qualityScore: 8.7
+      costPer1kTokens: { input: 0.0001, output: 0.0004 },
+      strengths: ['large-context', 'multimodal', 'cost-efficiency', 'speed'],
+      latencyMs: 900,
+      qualityScore: 9.0
     }
   };
 
   private routingRules: RoutingRule[] = [
     {
       condition: (req) => req.estimatedTokens > 100000,
-      model: 'gemini-2.0-flash-exp',
+      model: 'gemini-2.5-flash',
       provider: 'google',
       reasoning: 'Large context requires Gemini\'s 1M token window',
       priority: 1
@@ -301,7 +301,7 @@ export class IntelligentModelRouter {
       'claude-3-haiku-20240307': 'anthropic',
       'claude-3-5-sonnet-20241022': 'anthropic',
       'gpt-4o-mini': 'openai',
-      'gemini-2.0-flash-exp': 'google'
+      'gemini-2.5-flash': 'google'
     };
     
     return modelMapping[model] || 'anthropic';

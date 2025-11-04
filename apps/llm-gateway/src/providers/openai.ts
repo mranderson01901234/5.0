@@ -1,5 +1,6 @@
 import { BaseProvider } from './base.js';
 import type { ProviderStreamResult } from '../types.js';
+import type { MessageWithAttachments } from '../types.js';
 import type { Pool } from 'undici';
 
 export class OpenAIProvider extends BaseProvider {
@@ -17,13 +18,19 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   stream(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     model: string,
     options?: { max_tokens?: number; temperature?: number }
   ): ProviderStreamResult {
     const pool = this.pool;
     return {
       async *[Symbol.asyncIterator]() {
+        // Convert messages to OpenAI format (strip attachments for now - OpenAI GPT-4o-mini doesn't support vision)
+        const openaiMessages = messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        }));
+        
         const response = await pool.request({
           path: '/v1/chat/completions',
           method: 'POST',
@@ -33,7 +40,7 @@ export class OpenAIProvider extends BaseProvider {
           },
           body: JSON.stringify({
             model,
-            messages,
+            messages: openaiMessages,
             stream: true,
             max_tokens: options?.max_tokens,
             temperature: options?.temperature,
@@ -81,7 +88,7 @@ export class OpenAIProvider extends BaseProvider {
   }
 
   estimate(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     _model: string
   ): number {
     const systemPrompt = 4;

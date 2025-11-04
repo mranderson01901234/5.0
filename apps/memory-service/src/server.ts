@@ -23,6 +23,16 @@ import { loadResearchConfig } from './config.js';
 import { scheduleRetentionJob, loadRetentionConfig } from './retention.js';
 import { startEmbeddingWorker, stopEmbeddingWorker } from './embedding-worker.js';
 import Database from 'better-sqlite3';
+import { createRequire } from 'module';
+
+const require = createRequire(import.meta.url);
+let pinoPrettyPath: string | undefined;
+try {
+  pinoPrettyPath = require.resolve('pino-pretty');
+} catch (error) {
+  // pino-pretty not available, will use default JSON output
+  pinoPrettyPath = undefined;
+}
 
 const PORT = parseInt(process.env.MEMORY_SERVICE_PORT || process.env.PORT || '3001', 10);
 const HOST = process.env.HOST || '0.0.0.0';
@@ -32,8 +42,8 @@ const GATEWAY_DB_PATH = process.env.GATEWAY_DB_PATH || './apps/llm-gateway/gatew
 const logger = pino({
   name: 'memory-service',
   level: process.env.LOG_LEVEL || 'info',
-  transport: process.env.NODE_ENV !== 'production' ? {
-    target: 'pino-pretty',
+  transport: process.env.NODE_ENV !== 'production' && pinoPrettyPath ? {
+    target: pinoPrettyPath,
     options: {
       colorize: true,
       ignore: 'pid,hostname',
@@ -52,6 +62,8 @@ async function start() {
   // Initialize gateway database connection for fetching messages
   let gatewayDb: Database.Database | null = null;
   try {
+    // Ensure gateway database directory exists
+    mkdirSync(dirname(GATEWAY_DB_PATH), { recursive: true });
     gatewayDb = new Database(GATEWAY_DB_PATH);
     logger.info({ path: GATEWAY_DB_PATH }, 'Gateway database connected');
   } catch (error: any) {

@@ -1,6 +1,18 @@
 export * from '@llm-gateway/shared';
 import type { Provider } from '@llm-gateway/shared';
 
+export interface MessageWithAttachments {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+    url?: string;
+  }>;
+}
+
 export interface ProviderStreamResult extends AsyncIterable<string> {
   meta?: {
     provider: Provider;
@@ -15,11 +27,11 @@ export interface ProviderStreamResult extends AsyncIterable<string> {
 export interface IProvider {
   prepare(): Promise<void>;
   stream(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     model: string,
     options?: { max_tokens?: number; temperature?: number }
   ): ProviderStreamResult;
-  estimate(messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>, model: string): number;
+  estimate(messages: Array<MessageWithAttachments>, model: string): number;
 }
 
 export interface Message {

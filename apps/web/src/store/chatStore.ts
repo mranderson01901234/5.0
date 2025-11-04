@@ -1,10 +1,19 @@
 import { create } from "zustand";
 
+type FileAttachment = {
+  id: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  url?: string;
+};
+
 type Msg = {
   id:string;
   role:"user"|"assistant"|"system";
   content:string;
   sources?: Array<{ title: string; host: string; url?: string; date?: string }>;
+  attachments?: FileAttachment[];
 };
 
 type ThinkingStep = {
@@ -56,6 +65,9 @@ type State = {
   setView(view: View): void;
 };
 
+// Track message loads to prevent duplicates - stored outside Zustand to persist across renders
+const messageLoadTracker = new Map<string, { messageIds: Set<string>; timestamp: number }>();
+
 export const useChatStore = create<State>((set)=>({
   conversations: [],
   currentThreadId: "",
@@ -99,7 +111,10 @@ export const useChatStore = create<State>((set)=>({
     if(lastIdx >= 0 && lastIdx < messages.length && messages[lastIdx] && messages[lastIdx].role === "assistant") {
       const lastMsg = messages[lastIdx];
       if (lastMsg) {
-        messages[lastIdx] = { ...lastMsg, content: t, sources: sources ?? lastMsg.sources };
+        const finalSources = sources ?? lastMsg.sources;
+        messages[lastIdx] = finalSources 
+          ? { ...lastMsg, content: t, sources: finalSources }
+          : { ...lastMsg, content: t };
       }
     }
     
@@ -186,35 +201,133 @@ export const useChatStore = create<State>((set)=>({
   },
   
   loadConversations: (convs) => {
-    set(() => ({
-      conversations: convs.map(c => ({
-        id: c.id,
-        title: c.title,
-        messages: [],
-        updatedAt: c.updatedAt,
-      })),
-    }));
+    set((s) => {
+      // PRESERVE existing messages when loading conversations
+      // This prevents clearing messages that were already loaded
+      const existingConvs = new Map(s.conversations.map(c => [c.id, c]));
+      
+      return {
+        conversations: convs.map(c => {
+          const existing = existingConvs.get(c.id);
+          // If conversation exists and has messages, preserve them
+          if (existing && existing.messages.length > 0) {
+            return {
+              ...existing,
+              title: c.title, // Update title if it changed
+              updatedAt: c.updatedAt,
+            };
+          }
+          // New conversation - start with empty messages
+          return {
+            id: c.id,
+            title: c.title,
+            messages: [],
+            updatedAt: c.updatedAt,
+          };
+        }),
+      };
+    });
   },
   
   loadMessages: (threadId, msgs) => {
+    // Normalize IDs to strings for comparison (backend might return numbers)
+    const normalizeId = (id: string | number): string => String(id);
+    const normalizedIncoming = msgs.map(m => ({ ...m, id: normalizeId(m.id) }));
+    const incomingIds = new Set(normalizedIncoming.map(m => m.id));
+    
+    // CRITICAL: Check current state first - don't rely only on tracker
+    const currentState = useChatStore.getState();
+    const existingConv = currentState.conversations.find(c => c.id === threadId);
+    
+    // If conversation exists and already has messages, check if they match
+    if (existingConv && existingConv.messages.length > 0) {
+      const existingIds = new Set(existingConv.messages.map(m => normalizeId(m.id)));
+      
+      // If same count and all IDs match, we've already loaded these - abort completely
+      if (existingIds.size === incomingIds.size && 
+          existingIds.size > 0 &&
+          Array.from(existingIds).every(id => incomingIds.has(id))) {
+        console.log('[loadMessages] Messages already exist in state, skipping:', threadId, 'existing:', Array.from(existingIds), 'incoming:', Array.from(incomingIds));
+        return; // Exit early - don't even call set()
+      }
+      
+      // DEBUG: Log if first message matches but others don't
+      if (existingConv.messages.length > 0 && normalizedIncoming.length > 0) {
+        const firstExistingMsg = existingConv.messages[0];
+        const firstIncomingMsg = normalizedIncoming[0];
+        if (firstExistingMsg && firstIncomingMsg) {
+          const firstExisting = normalizeId(firstExistingMsg.id);
+          const firstIncoming = normalizeId(firstIncomingMsg.id);
+          if (firstExisting === firstIncoming) {
+            console.log('[loadMessages] WARNING: First message ID matches but not all messages:', {
+              threadId,
+              firstId: firstExisting,
+              existingCount: existingConv.messages.length,
+              incomingCount: normalizedIncoming.length,
+              existingIds: Array.from(existingIds),
+              incomingIds: Array.from(incomingIds)
+            });
+          }
+        }
+      }
+    }
+    
+    // Also check tracker as secondary defense
+    const tracker = messageLoadTracker.get(threadId);
+    
+    if (tracker) {
+      const trackerIds = new Set(Array.from(tracker.messageIds).map(normalizeId));
+      // If same count and all IDs match, we've already loaded these - abort completely
+      if (trackerIds.size === incomingIds.size && 
+          trackerIds.size > 0 &&
+          Array.from(trackerIds).every(id => incomingIds.has(id))) {
+        console.log('[loadMessages] Already loaded these messages (tracker), skipping:', threadId);
+        return; // Exit early - don't even call set()
+      }
+    }
+    
     set((s) => {
       const updatedConvs = s.conversations.map(c => {
         if(c.id !== threadId) return c;
         
-        // Remove duplicate messages by ID to prevent duplicates on refresh
+        // FINAL CHECK: If messages already exist and match, skip
+        if (c.messages.length > 0) {
+          const existingIds = new Set(c.messages.map(m => normalizeId(m.id)));
+          if (existingIds.size === incomingIds.size && 
+              existingIds.size > 0 &&
+              Array.from(existingIds).every(id => incomingIds.has(id))) {
+            console.log('[loadMessages] Messages match existing state, skipping update:', threadId);
+            return c; // Return unchanged
+          }
+        }
+        
+        // Remove duplicate messages by ID within the incoming messages array
         const seenIds = new Set<string>();
-        const uniqueMsgs = msgs.filter(m => {
-          if (seenIds.has(m.id)) {
+        const uniqueMsgs = normalizedIncoming.filter(m => {
+          const id = normalizeId(m.id);
+          if (seenIds.has(id)) {
+            console.log('[loadMessages] Duplicate ID in incoming array:', id);
             return false;
           }
-          seenIds.add(m.id);
+          seenIds.add(id);
           return true;
         });
         
+        // CRITICAL: Always replace messages completely, never merge
+        const finalMessages = uniqueMsgs as Msg[];
+        
+        // Update tracker BEFORE setting state
+        messageLoadTracker.set(threadId, {
+          messageIds: new Set(finalMessages.map(m => normalizeId(m.id))),
+          timestamp: Date.now()
+        });
+        
+        console.log('[loadMessages] Loading', finalMessages.length, 'messages for thread:', threadId, 'message IDs:', finalMessages.map(m => m.id));
+        
         // Generate title from first user message if title is still "New Chat" or empty
         let newTitle = c.title;
-        if((c.title === "New Chat" || !c.title.trim()) && uniqueMsgs.length > 0) {
-          const firstUserMsg = uniqueMsgs.find(m => m.role === "user");
+        if((c.title === "New Chat" || !c.title.trim()) && finalMessages.length > 0) {
+          const firstUserMsg = finalMessages.find(m => m.role === "user");
           if(firstUserMsg && firstUserMsg.content.trim()) {
             const text = firstUserMsg.content.trim();
             const preview = text.slice(0, 50);
@@ -223,7 +336,7 @@ export const useChatStore = create<State>((set)=>({
         }
         
         // Once messages are loaded from server, conversation is no longer local-only
-        return { ...c, messages: uniqueMsgs as Msg[], title: newTitle, isLocal: false };
+        return { ...c, messages: finalMessages, title: newTitle, isLocal: false };
       });
       return { conversations: updatedConvs };
     });

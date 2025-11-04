@@ -84,6 +84,12 @@ export class ThinkingEngine {
       ['Analyzing request...', 'Processing information...', 'Structuring response...', 'Finalizing output...'],
       ['Examining query...', 'Organizing thoughts...', 'Preparing response...'],
       ['Processing request...', 'Formulating answer...', 'Finalizing details...']
+    ],
+
+    image: [
+      ['Analyzing image requirements...', 'Processing visual details...', 'Preparing image generation...', 'Rendering image...'],
+      ['Understanding image prompt...', 'Configuring generation parameters...', 'Creating image...'],
+      ['Reviewing image request...', 'Setting up generation...', 'Generating visual content...', 'Finalizing image...']
     ]
   };
 

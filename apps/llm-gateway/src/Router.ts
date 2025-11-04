@@ -1,5 +1,5 @@
 import { loadConfig } from './config.js';
-import type { IProvider } from './types.js';
+import type { IProvider, MessageWithAttachments } from './types.js';
 import { logger } from './log.js';
 import { getDatabase } from './database.js';
 
@@ -25,8 +25,8 @@ export class Router {
       model: 'gemini-2.0-flash-exp'
     },
     'fallback': {
-      provider: 'anthropic' as const,
-      model: 'claude-3-haiku-20240307'
+      provider: 'openai' as const,
+      model: 'gpt-4o-mini'
     }
   };
 
@@ -96,7 +96,7 @@ export class Router {
 
   async routeFR(
     provider: IProvider,
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     model: string,
     options?: { max_tokens?: number; temperature?: number }
   ): Promise<{ content: string; latency: number } | null> {
@@ -132,7 +132,7 @@ export class Router {
 
   routePrimary(
     provider: IProvider,
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     model: string,
     options?: { max_tokens?: number; temperature?: number }
   ): AsyncIterable<string> {
@@ -140,4 +140,3 @@ export class Router {
     return result;
   }
 }
-

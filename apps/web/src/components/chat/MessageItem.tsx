@@ -2,12 +2,18 @@ import React, { useState, useEffect, useRef } from 'react';
 import MessageContent from './MessageContent';
 import SourcesDropdown from './SourcesDropdown';
 import ThinkingIndicator, { type ThinkingStep } from './ThinkingIndicator';
+import ArtifactMessageCard from './ArtifactMessageCard';
+import FileAttachment from './FileAttachment';
+import { useArtifactStore } from '@/store/artifactStore';
+import { useChatStore } from '@/store/chatStore';
+import { useUIStore } from '@/store/uiStore';
 
 export type Message = {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
   sources?: Array<{ title: string; host: string; url?: string; date?: string }>;
+  attachments?: Array<{ id: string; filename: string; mimeType: string; size: number; url?: string }>;
 };
 
 type Props = {
@@ -30,6 +36,24 @@ const MessageItemBase: React.FC<Props> = ({
   thinkingSteps = []
 }) => {
   const isUser = msg.role === "user";
+  const currentThreadId = useChatStore(s => s.currentThreadId);
+  const artifacts = useArtifactStore(s => s.artifacts);
+  const inChatArtifactsEnabled = useUIStore(s => s.inChatArtifactsEnabled);
+  
+  // Detect artifact-bearing messages:
+  // 1. Check message.meta?.artifactId (if meta exists)
+  // 2. Check if message.role === "assistant" and has artifacts for this thread
+  const messageMeta = (msg as any).meta as { artifactId?: string } | undefined;
+  const artifactId = messageMeta?.artifactId;
+  
+  // Get artifacts for this message's thread (show after assistant messages)
+  // If message has artifactId in meta, use that; otherwise show all artifacts for thread
+  const messageArtifacts = !isUser && currentThreadId && inChatArtifactsEnabled
+    ? artifactId
+      ? artifacts.filter(a => a.id === artifactId)
+      : artifacts.filter(a => a.threadId === currentThreadId)
+    : [];
+  
   const showFRChip = isLastAssistant && frChip && ttfbMs !== undefined && ttfbMs > 400;
   const [copied, setCopied] = useState(false);
   const messageRef = useRef<HTMLElement>(null);
@@ -193,11 +217,20 @@ const MessageItemBase: React.FC<Props> = ({
       {/* Message content */}
       <div className={isUser ? "max-w-[85%]" : "w-full"} style={{ order: isUser ? 1 : 0 }}>
         {isUser ? (
-          <div className="bg-gray-200/20 rounded-lg px-3 py-0.5 border border-gray-300/20 inline-block">
-            <div className="[&_.message-content-user]:mb-0 [&_.message-content-user_p]:mb-0 [&_.message-content-user]:leading-snug [&_.message-content-user]:pb-0">
-              <MessageContent content={msg.content} isUser={isUser} />
+          <>
+            <div className="bg-gray-200/20 rounded-lg px-3 py-0.5 border border-gray-300/20 inline-block">
+              <div className="[&_.message-content-user]:mb-0 [&_.message-content-user_p]:mb-0 [&_.message-content-user]:leading-snug [&_.message-content-user]:pb-0">
+                <MessageContent content={msg.content} isUser={isUser} />
+              </div>
             </div>
-          </div>
+            {msg.attachments && msg.attachments.length > 0 && (
+              <div className="mt-2 space-y-2">
+                {msg.attachments.map((attachment) => (
+                  <FileAttachment key={attachment.id} attachment={attachment} />
+                ))}
+              </div>
+            )}
+          </>
         ) : (
           <>
             {/* Show thinking steps before message content */}
@@ -289,6 +322,15 @@ const MessageItemBase: React.FC<Props> = ({
                 <path d="M9 18.12 10 14H4.17a2 2 0 0 0-1.92 2.56l2.33 8A2 2 0 0 0 6.5 22H20a2 2 0 0 0 2-2v-8a2 2 0 0 0-2-2h-2.76a2 2 0 0 1-1.79-1.11L12 2h0a3.13 3.13 0 0 0-3 3.88Z" />
               </svg>
             </button>
+          </div>
+        )}
+
+        {/* Inline Artifacts - Show after assistant messages using ArtifactMessageCard */}
+        {!isUser && messageArtifacts.length > 0 && inChatArtifactsEnabled && (
+          <div className="mt-4 space-y-4">
+            {messageArtifacts.map((artifact) => (
+              <ArtifactMessageCard key={artifact.id} artifact={artifact} isExpanded={true} />
+            ))}
           </div>
         )}
       </div>

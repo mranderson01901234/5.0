@@ -8,7 +8,11 @@ import { withRetry } from '@/utils/retry';
 import { classifyFetchError, friendlyMessage } from '@/utils/errorClassify';
 
 const { VITE_API_BASE_URL } = getEnv();
-const baseUrl = VITE_API_BASE_URL;
+// Normalize baseUrl: if it's just "/", keep it; otherwise remove trailing slash
+// This prevents double slashes when constructing URLs like `${baseUrl}/v1/...`
+const baseUrl = VITE_API_BASE_URL === '/' 
+  ? '' // Empty string for relative URLs, so `/v1/...` becomes `/v1/...` not `//v1/...`
+  : (VITE_API_BASE_URL.endsWith('/') ? VITE_API_BASE_URL.slice(0, -1) : VITE_API_BASE_URL);
 
 function getHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = { "Content-Type":"application/json" };
@@ -198,13 +202,182 @@ export async function deleteConversation(threadId: string, token?: string): Prom
   try {
     if (!threadId) throw new Error('threadId required');
     const url = `${baseUrl}/v1/conversations/${threadId}`;
-    const headers = getHeaders(token);
+    // DELETE requests don't need Content-Type header when there's no body
+    const headers: Record<string, string> = {};
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
     const resp = await fetch(url, { method:"DELETE", headers });
-    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    if(!resp.ok) {
+      // Try to get error details from response
+      let errorMessage = `HTTP ${resp.status}`;
+      try {
+        const errorData = await resp.json();
+        if (errorData.error) {
+          errorMessage = errorData.error;
+        }
+      } catch {
+        // Ignore JSON parse errors
+      }
+      throw new Error(errorMessage);
+    }
   } catch (err: unknown) {
     handleApiError(err, {
       action: 'deleting conversation',
       fallbackMessage: 'Failed to delete conversation.',
+    });
+  }
+}
+
+/**
+ * Create an artifact
+ */
+export async function createArtifact(
+  payload: {
+    threadId: string;
+    type: "table" | "doc" | "sheet";
+    data: unknown;
+    metadata?: Record<string, unknown>;
+  },
+  token?: string
+): Promise<{
+  id: string;
+  threadId: string;
+  type: "table" | "doc" | "sheet";
+  data: unknown;
+  metadata?: Record<string, unknown>;
+  createdAt: number;
+}> {
+  try {
+    const url = `${baseUrl}/api/artifacts/create`;
+    const headers = getHeaders(token);
+    const resp = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await json(resp);
+  } catch (err: unknown) {
+    handleApiError(err, {
+      action: 'creating artifact',
+      fallbackMessage: 'Failed to create artifact.',
+    });
+  }
+}
+
+/**
+ * Get all artifacts for a thread
+ */
+export async function getArtifacts(
+  threadId: string,
+  token?: string
+): Promise<{
+  artifacts: Array<{
+    id: string;
+    threadId: string;
+    type: "table" | "doc" | "sheet";
+    data: unknown;
+    metadata?: Record<string, unknown>;
+    createdAt: number;
+  }>;
+}> {
+  try {
+    const url = `${baseUrl}/api/artifacts/${threadId}`;
+    const headers = getHeaders(token);
+    const resp = await fetch(url, { method: "GET", headers });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await json(resp);
+  } catch (err: unknown) {
+    handleApiError(err, {
+      action: 'loading artifacts',
+      fallbackMessage: 'Failed to load artifacts.',
+    });
+  }
+}
+
+/**
+ * Get export job status
+ */
+export async function getExportStatus(
+  exportId: string,
+  token?: string
+): Promise<{
+  id: string;
+  artifactId: string;
+  format: "pdf" | "docx" | "xlsx";
+  url: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  createdAt: number;
+}> {
+  try {
+    const url = `${baseUrl}/api/exports/status/${exportId}`;
+    const headers = getHeaders(token);
+    const resp = await fetch(url, { method: "GET", headers });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await json(resp);
+  } catch (err: unknown) {
+    handleApiError(err, {
+      action: 'checking export status',
+      fallbackMessage: 'Failed to check export status.',
+    });
+  }
+}
+
+/**
+ * Export an artifact to PDF/DOCX/XLSX
+ */
+export async function exportArtifact(
+  payload: {
+    artifactId: string;
+    format: "pdf" | "docx" | "xlsx";
+  },
+  token?: string
+): Promise<{
+  id: string;
+  artifactId: string;
+  format: "pdf" | "docx" | "xlsx";
+  url: string;
+  status: "queued" | "processing" | "completed" | "failed";
+  createdAt: number;
+}> {
+  try {
+    const url = `${baseUrl}/api/artifacts/export`;
+    const headers = getHeaders(token);
+    const resp = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await json(resp);
+  } catch (err: unknown) {
+    handleApiError(err, {
+      action: 'exporting artifact',
+      fallbackMessage: 'Failed to export artifact.',
+    });
+  }
+}
+
+/**
+ * Delete an artifact
+ */
+export async function deleteArtifact(
+  artifactId: string,
+  token?: string
+): Promise<void> {
+  try {
+    const url = `${baseUrl}/api/artifacts/${artifactId}`;
+    const headers = getHeaders(token);
+    const resp = await fetch(url, {
+      method: "DELETE",
+      headers,
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  } catch (err: unknown) {
+    handleApiError(err, {
+      action: 'deleting artifact',
+      fallbackMessage: 'Failed to delete artifact.',
     });
   }
 }

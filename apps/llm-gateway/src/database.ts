@@ -95,7 +95,126 @@ export function getDatabase(): Database.Database {
       CREATE INDEX IF NOT EXISTS idx_cost_tracking_user_time ON cost_tracking(user_id, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_cost_tracking_model_time ON cost_tracking(model, timestamp DESC);
       CREATE INDEX IF NOT EXISTS idx_cost_tracking_timestamp ON cost_tracking(timestamp DESC);
+
+      -- Artifacts table for Phase 4
+      CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        type TEXT NOT NULL CHECK(type IN ('table', 'doc', 'sheet', 'image')),
+        data TEXT NOT NULL,
+        metadata TEXT,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch('now')),
+        deleted_at INTEGER
+      );
+
+      -- Indexes for artifacts
+      CREATE INDEX IF NOT EXISTS idx_artifacts_user_thread ON artifacts(user_id, thread_id) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at DESC) WHERE deleted_at IS NULL;
+
+      -- Exports table for Phase 5
+      CREATE TABLE IF NOT EXISTS exports (
+        id TEXT PRIMARY KEY,
+        artifact_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        format TEXT NOT NULL CHECK(format IN ('pdf', 'docx', 'xlsx')),
+        url TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')) DEFAULT 'queued',
+        created_at INTEGER NOT NULL DEFAULT (unixepoch('now')),
+        FOREIGN KEY (artifact_id) REFERENCES artifacts(id)
+      );
+
+      -- Indexes for exports
+      CREATE INDEX IF NOT EXISTS idx_exports_artifact ON exports(artifact_id);
+      CREATE INDEX IF NOT EXISTS idx_exports_user ON exports(user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_exports_status ON exports(status, created_at DESC);
+
+      -- Uploads table for file uploads
+      CREATE TABLE IF NOT EXISTS uploads (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        thread_id TEXT,
+        filename TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        storage_path TEXT NOT NULL,
+        storage_url TEXT NOT NULL,
+        created_at INTEGER NOT NULL DEFAULT (unixepoch('now')),
+        deleted_at INTEGER
+      );
+
+      -- Indexes for uploads
+      CREATE INDEX IF NOT EXISTS idx_uploads_user_thread ON uploads(user_id, thread_id) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_uploads_thread ON uploads(thread_id, created_at DESC) WHERE deleted_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_uploads_user ON uploads(user_id, created_at DESC) WHERE deleted_at IS NULL;
+
+      -- Image cache table for Imagen optimization
+      CREATE TABLE IF NOT EXISTS image_cache (
+        cache_key TEXT PRIMARY KEY,
+        prompt TEXT NOT NULL,
+        options TEXT NOT NULL,
+        images TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        last_accessed INTEGER NOT NULL,
+        hit_count INTEGER NOT NULL DEFAULT 0
+      );
+
+      -- Indexes for image cache
+      CREATE INDEX IF NOT EXISTS idx_image_cache_created ON image_cache(created_at);
+      CREATE INDEX IF NOT EXISTS idx_image_cache_accessed ON image_cache(last_accessed);
+      CREATE INDEX IF NOT EXISTS idx_image_cache_prompt ON image_cache(prompt);
     `);
+
+    // Migration: Update artifacts table to include 'image' type if CHECK constraint doesn't allow it
+    try {
+      // Clean up any leftover artifacts_new table from failed migrations
+      db.exec(`DROP TABLE IF EXISTS artifacts_new;`);
+      
+      // SQLite doesn't support ALTER TABLE to modify CHECK constraints
+      // We need to recreate the table if it exists with the old constraint
+      const tableInfo = db.prepare(`
+        SELECT sql FROM sqlite_master 
+        WHERE type='table' AND name='artifacts'
+      `).get() as { sql: string } | undefined;
+      
+      if (tableInfo && tableInfo.sql && !tableInfo.sql.includes("'image'")) {
+        logger.info('Migrating artifacts table to support image type...');
+        // Create new table with image support - use transaction for atomicity
+        db.exec(`
+          BEGIN TRANSACTION;
+          
+          CREATE TABLE artifacts_new (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            thread_id TEXT NOT NULL,
+            type TEXT NOT NULL CHECK(type IN ('table', 'doc', 'sheet', 'image')),
+            data TEXT NOT NULL,
+            metadata TEXT,
+            created_at INTEGER NOT NULL DEFAULT (unixepoch('now')),
+            deleted_at INTEGER
+          );
+          
+          INSERT INTO artifacts_new SELECT * FROM artifacts;
+          DROP TABLE artifacts;
+          ALTER TABLE artifacts_new RENAME TO artifacts;
+          
+          CREATE INDEX IF NOT EXISTS idx_artifacts_user_thread ON artifacts(user_id, thread_id) WHERE deleted_at IS NULL;
+          CREATE INDEX IF NOT EXISTS idx_artifacts_thread ON artifacts(thread_id, created_at DESC) WHERE deleted_at IS NULL;
+          
+          COMMIT;
+        `);
+        logger.info('Artifacts table migration completed');
+      }
+    } catch (e: any) {
+      logger.warn({ error: e.message }, 'Failed to migrate artifacts table (may already support image type)');
+      // Rollback on error
+      try {
+        db.exec('ROLLBACK;');
+        db.exec('DROP TABLE IF EXISTS artifacts_new;');
+      } catch (rollbackError: any) {
+        logger.warn({ error: rollbackError.message }, 'Failed to rollback migration');
+      }
+    }
 
     // Migration: Add missing columns to existing tables (if they don't exist)
     try {
@@ -157,6 +276,39 @@ export function getDatabase(): Database.Database {
       `);
     } catch (e: any) {
       logger.warn({ error: e.message }, 'Failed to create embedding index (may not be needed yet)');
+    }
+
+    // Migration: Update exports table to support 'queued' status
+    try {
+      const tableInfo = db.pragma('table_info(exports)') as { name: string; type: string; pk: number }[];
+      if (tableInfo.length > 0) {
+        const statusColumn = tableInfo.find(col => col.name === 'status');
+        const sql = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='exports'`).get() as { sql: string };
+
+        if (sql && !sql.sql.includes("'queued'")) {
+          logger.warn('Old exports schema detected. Migrating table...');
+          db.transaction(() => {
+            db.exec('ALTER TABLE exports RENAME TO exports_old');
+            db.exec(`
+              CREATE TABLE exports (
+                id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                format TEXT NOT NULL CHECK(format IN ('pdf', 'docx', 'xlsx')),
+                url TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')) DEFAULT 'queued',
+                created_at INTEGER NOT NULL DEFAULT (unixepoch('now')),
+                FOREIGN KEY (artifact_id) REFERENCES artifacts(id)
+              );
+            `);
+            db.exec('INSERT INTO exports (id, artifact_id, user_id, format, url, status, created_at) SELECT id, artifact_id, user_id, format, url, status, created_at FROM exports_old');
+            db.exec('DROP TABLE exports_old');
+            logger.info('✅ Successfully migrated exports table.');
+          })();
+        }
+      }
+    } catch (e: any) {
+      // Ignore if table doesn't exist yet
     }
 
     // FTS5 Full-Text Search - Re-enabled with proper migration

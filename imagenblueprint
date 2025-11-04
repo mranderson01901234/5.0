@@ -1,0 +1,1836 @@
+# Imagen4 Optimization Implementation Blueprint
+
+**Version:** 1.0  
+**Created:** 2025-11-04  
+**Target Completion:** 4 weeks  
+**Estimated Cost Reduction:** 40-65%  
+**Performance Improvement:** 2-3x for cached requests
+
+---
+
+## Table of Contents
+
+1. [Implementation Phases](#implementation-phases)
+2. [Week 1: Reliability Foundation](#week-1-reliability-foundation)
+3. [Week 2: Caching Implementation](#week-2-caching-implementation)
+4. [Week 3: Concurrency & Validation](#week-3-concurrency--validation)
+5. [Week 4: Storage Migration](#week-4-storage-migration)
+6. [Code Templates](#code-templates)
+7. [Testing Strategy](#testing-strategy)
+8. [Monitoring Setup](#monitoring-setup)
+9. [Rollback Plans](#rollback-plans)
+
+---
+
+## Implementation Phases
+
+### Phase Overview
+
+| Phase | Focus | Duration | Priority | Impact |
+|-------|-------|----------|----------|---------|
+| Week 1 | Retry Logic + Timeouts | 3-4 hours | HIGH | Reliability |
+| Week 2 | Image Caching | 6-8 hours | HIGH | 30-50% cost reduction |
+| Week 3 | Concurrency + Validation | 4-6 hours | MEDIUM | Scaling protection |
+| Week 4 | Storage Migration | 10-12 hours | HIGH | Architecture improvement |
+
+### Success Metrics
+
+- **Reliability:** <5% error rate (down from current unknown%)
+- **Performance:** <2s response time for cache hits
+- **Cost:** 40-65% reduction in API costs
+- **User Experience:** <1s loading states, clear error messages
+
+---
+
+## Week 1: Reliability Foundation
+
+### Objective
+Implement retry logic and request timeouts to prevent wasted API calls and improve reliability.
+
+### Tasks
+
+#### 1.1 Create Retry Utility Module
+
+**File:** `apps/llm-gateway/src/utils/retry.ts`
+
+```typescript
+import { logger } from '../log.js';
+
+export interface RetryOptions {
+  maxRetries?: number;
+  initialDelayMs?: number;
+  maxDelayMs?: number;
+  retryableStatusCodes?: number[];
+  timeoutMs?: number;
+}
+
+export interface RetryableError extends Error {
+  statusCode?: number;
+  retryable?: boolean;
+}
+
+export class TimeoutError extends Error {
+  constructor(timeoutMs: number) {
+    super(`Request timed out after ${timeoutMs}ms`);
+    this.name = 'TimeoutError';
+  }
+}
+
+export class NonRetryableError extends Error {
+  constructor(message: string, public statusCode?: number) {
+    super(message);
+    this.name = 'NonRetryableError';
+  }
+}
+
+export async function fetchWithRetry(
+  url: string,
+  options: RequestInit,
+  retryOptions: RetryOptions = {}
+): Promise<Response> {
+  const {
+    maxRetries = 3,
+    initialDelayMs = 1000,
+    maxDelayMs = 10000,
+    retryableStatusCodes = [429, 500, 502, 503, 504],
+    timeoutMs = 60000,
+  } = retryOptions;
+
+  let lastError: Error | null = null;
+
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // Add delay for retries
+      if (attempt > 0) {
+        const delayMs = Math.min(
+          initialDelayMs * Math.pow(2, attempt - 1),
+          maxDelayMs
+        );
+        logger.debug({ attempt, delayMs }, 'Retry attempt with backoff');
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+      }
+
+      // Create timeout controller
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      
+      try {
+        const response = await fetch(url, {
+          ...options,
+          signal: controller.signal,
+        });
+        
+        clearTimeout(timeoutId);
+
+        // Handle rate limits with Retry-After header
+        if (response.status === 429) {
+          const retryAfter = response.headers.get('Retry-After');
+          if (retryAfter && attempt < maxRetries) {
+            const retryAfterMs = parseInt(retryAfter, 10) * 1000;
+            logger.warn({ retryAfterMs }, 'Rate limited, waiting for retry-after');
+            await new Promise(resolve => setTimeout(resolve, retryAfterMs));
+            continue;
+          }
+        }
+
+        // Don't retry client errors (4xx) except rate limits
+        if (response.status >= 400 && response.status < 500 && response.status !== 429) {
+          const errorText = await response.text();
+          throw new NonRetryableError(`HTTP ${response.status}: ${errorText}`, response.status);
+        }
+
+        // Retry server errors (5xx) if they're in retryable list
+        if (response.status >= 500 && retryableStatusCodes.includes(response.status)) {
+          if (attempt < maxRetries) {
+            const errorText = await response.text();
+            lastError = new Error(`HTTP ${response.status}: ${errorText}`);
+            continue;
+          }
+        }
+
+        return response;
+      } catch (error: any) {
+        clearTimeout(timeoutId);
+        if (error.name === 'AbortError') {
+          throw new TimeoutError(timeoutMs);
+        }
+        throw error;
+      }
+    } catch (error: any) {
+      lastError = error;
+      
+      // Don't retry non-retryable errors
+      if (error instanceof NonRetryableError || error instanceof TimeoutError) {
+        throw error;
+      }
+      
+      // Don't retry content policy violations
+      if (error.message?.toLowerCase().includes('content policy')) {
+        throw new NonRetryableError(error.message);
+      }
+      
+      if (attempt === maxRetries) {
+        logger.error({ error, attempt, maxRetries }, 'Max retries exceeded');
+        throw error;
+      }
+
+      logger.warn({ error: error.message, attempt }, 'Request failed, will retry');
+    }
+  }
+
+  throw lastError || new Error('Failed to fetch after retries');
+}
+```
+
+#### 1.2 Update Imagen Implementation
+
+**File:** `apps/llm-gateway/src/utils/imagen.ts`
+
+```typescript
+// Add import at top
+import { fetchWithRetry } from './retry.js';
+
+// Replace the fetch call (around line 250) with:
+export async function generateImage(prompt: string, opts?: ImageGenOptions): Promise<ImageData[]> {
+  // ... existing code until fetch call ...
+
+  try {
+    const response = await fetchWithRetry(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+    }, {
+      maxRetries: 3,
+      timeoutMs: 60000,
+      retryableStatusCodes: [429, 500, 502, 503, 504],
+    });
+
+    // ... rest of existing code unchanged ...
+  } catch (error: any) {
+    logger.error({ error, prompt: prompt.substring(0, 100) }, 'Image generation failed');
+    
+    // Map specific errors to user-friendly messages
+    if (error instanceof TimeoutError) {
+      throw new Error('Image generation timed out. Please try again with a simpler prompt.');
+    }
+    
+    if (error instanceof NonRetryableError) {
+      if (error.statusCode === 400) {
+        throw new Error('Invalid request. Please check your prompt and try again.');
+      }
+      if (error.statusCode === 403) {
+        throw new Error('Your prompt may violate content policy. Please rephrase and try again.');
+      }
+    }
+    
+    // ... existing error handling ...
+  }
+}
+```
+
+#### 1.3 Testing
+
+**File:** `apps/llm-gateway/src/utils/__tests__/retry.test.ts`
+
+```typescript
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { fetchWithRetry, TimeoutError, NonRetryableError } from '../retry.js';
+
+// Global fetch mock
+global.fetch = vi.fn();
+
+describe('fetchWithRetry', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('should succeed on first attempt', async () => {
+    const mockResponse = new Response('success', { status: 200 });
+    vi.mocked(fetch).mockResolvedValueOnce(mockResponse);
+
+    const result = await fetchWithRetry('http://test.com', {});
+    expect(result).toBe(mockResponse);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('should retry on 500 error', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(new Response('error', { status: 500 }))
+      .mockResolvedValueOnce(new Response('success', { status: 200 }));
+
+    const result = await fetchWithRetry('http://test.com', {}, { maxRetries: 2 });
+    expect(result.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('should not retry on 400 error', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(new Response('bad request', { status: 400 }));
+
+    await expect(fetchWithRetry('http://test.com', {}))
+      .rejects.toThrow(NonRetryableError);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('should handle rate limits with Retry-After', async () => {
+    const rateLimitResponse = new Response('rate limited', { 
+      status: 429,
+      headers: { 'Retry-After': '1' }
+    });
+    const successResponse = new Response('success', { status: 200 });
+    
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(rateLimitResponse)
+      .mockResolvedValueOnce(successResponse);
+
+    const result = await fetchWithRetry('http://test.com', {}, { maxRetries: 2 });
+    expect(result.status).toBe(200);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+});
+```
+
+### Week 1 Deliverables
+
+- ✅ Retry utility module with exponential backoff
+- ✅ Request timeout handling with AbortController
+- ✅ Rate limit detection with Retry-After header support
+- ✅ Comprehensive error classification
+- ✅ Unit tests for retry logic
+- ✅ Updated imagen.ts to use retry logic
+
+### Week 1 Success Criteria
+
+- All imagen requests have 60s timeout
+- Failed requests retry up to 3 times with exponential backoff
+- Rate limits are handled gracefully with proper delays
+- Error rates decrease by 80%+ for transient failures
+
+---
+
+## Week 2: Caching Implementation
+
+### Objective
+Implement multi-layer caching to reduce API costs by 30-50% for repeated prompts.
+
+### Tasks
+
+#### 2.1 Create Cache Utility Module
+
+**File:** `apps/llm-gateway/src/utils/imageCache.ts`
+
+```typescript
+import { createHash } from 'crypto';
+import { getDatabase } from '../database.js';
+import { logger } from '../log.js';
+
+export interface CacheEntry {
+  images: Array<{ mime: string; dataUrl: string }>;
+  prompt: string;
+  options: string;
+  createdAt: number;
+  hitCount: number;
+}
+
+export interface CacheStats {
+  memoryHits: number;
+  memoryMisses: number;
+  dbHits: number;
+  dbMisses: number;
+  totalSaved: number; // Estimated cost saved
+}
+
+// In-memory cache (L1)
+const memoryCache = new Map<string, CacheEntry>();
+const MEMORY_CACHE_MAX_SIZE = 100;
+const MEMORY_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+
+// Database cache (L2) 
+const DB_CACHE_TTL = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+// Statistics
+const cacheStats: CacheStats = {
+  memoryHits: 0,
+  memoryMisses: 0,
+  dbHits: 0,
+  dbMisses: 0,
+  totalSaved: 0,
+};
+
+function generateCacheKey(prompt: string, opts?: ImageGenOptions): string {
+  const normalizedPrompt = normalizePrompt(prompt);
+  const hash = createHash('sha256');
+  hash.update(normalizedPrompt);
+  hash.update(JSON.stringify(sortObjectKeys(opts || {})));
+  return hash.digest('hex');
+}
+
+function normalizePrompt(prompt: string): string {
+  return prompt
+    .toLowerCase()
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[^\w\s]/g, ''); // Remove special characters for better cache hits
+}
+
+function sortObjectKeys(obj: any): any {
+  if (typeof obj !== 'object' || obj === null) return obj;
+  if (Array.isArray(obj)) return obj.map(sortObjectKeys);
+  
+  const sorted: any = {};
+  Object.keys(obj).sort().forEach(key => {
+    sorted[key] = sortObjectKeys(obj[key]);
+  });
+  return sorted;
+}
+
+export async function getCachedImage(
+  prompt: string,
+  opts?: ImageGenOptions
+): Promise<Array<{ mime: string; dataUrl: string }> | null> {
+  const key = generateCacheKey(prompt, opts);
+
+  // Check L1 cache (memory)
+  const memoryEntry = memoryCache.get(key);
+  if (memoryEntry) {
+    const age = Date.now() - memoryEntry.createdAt;
+    if (age < MEMORY_CACHE_TTL) {
+      memoryEntry.hitCount++;
+      cacheStats.memoryHits++;
+      cacheStats.totalSaved += estimateImageCost(opts);
+      logger.debug({ key: key.substring(0, 8), hitCount: memoryEntry.hitCount }, 'L1 cache hit');
+      return memoryEntry.images;
+    }
+    memoryCache.delete(key);
+  }
+  cacheStats.memoryMisses++;
+
+  // Check L2 cache (database)
+  try {
+    const db = getDatabase();
+    const cached = db.prepare(`
+      SELECT images, created_at, hit_count, prompt, options
+      FROM image_cache
+      WHERE cache_key = ? AND created_at > ?
+    `).get(key, Date.now() - DB_CACHE_TTL) as {
+      images: string;
+      created_at: number;
+      hit_count: number;
+      prompt: string;
+      options: string;
+    } | undefined;
+
+    if (cached) {
+      const images = JSON.parse(cached.images);
+      
+      // Update hit count in database
+      db.prepare(`
+        UPDATE image_cache
+        SET hit_count = hit_count + 1, last_accessed = ?
+        WHERE cache_key = ?
+      `).run(Date.now(), key);
+
+      // Promote to L1 cache
+      memoryCache.set(key, {
+        images,
+        prompt: cached.prompt,
+        options: cached.options,
+        createdAt: cached.created_at,
+        hitCount: cached.hit_count + 1,
+      });
+
+      // Manage L1 cache size (LRU eviction)
+      if (memoryCache.size > MEMORY_CACHE_MAX_SIZE) {
+        const oldestKey = Array.from(memoryCache.entries())
+          .sort((a, b) => a[1].createdAt - b[1].createdAt)[0][0];
+        memoryCache.delete(oldestKey);
+      }
+
+      cacheStats.dbHits++;
+      cacheStats.totalSaved += estimateImageCost(opts);
+      logger.debug({ key: key.substring(0, 8), hitCount: cached.hit_count + 1 }, 'L2 cache hit');
+      return images;
+    }
+  } catch (error) {
+    logger.warn({ error }, 'Failed to check L2 cache');
+  }
+
+  cacheStats.dbMisses++;
+  return null;
+}
+
+export async function setCachedImage(
+  prompt: string,
+  opts: ImageGenOptions | undefined,
+  images: Array<{ mime: string; dataUrl: string }>
+): Promise<void> {
+  const key = generateCacheKey(prompt, opts);
+  const normalizedPrompt = normalizePrompt(prompt);
+  const now = Date.now();
+
+  // Update L1 cache
+  memoryCache.set(key, {
+    images,
+    prompt: normalizedPrompt,
+    options: JSON.stringify(opts || {}),
+    createdAt: now,
+    hitCount: 0,
+  });
+
+  // Manage L1 cache size
+  if (memoryCache.size > MEMORY_CACHE_MAX_SIZE) {
+    const oldestKey = Array.from(memoryCache.entries())
+      .sort((a, b) => a[1].createdAt - b[1].createdAt)[0][0];
+    memoryCache.delete(oldestKey);
+  }
+
+  // Update L2 cache
+  try {
+    const db = getDatabase();
+    db.prepare(`
+      INSERT OR REPLACE INTO image_cache (
+        cache_key, prompt, options, images, created_at, last_accessed, hit_count
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      key,
+      normalizedPrompt,
+      JSON.stringify(opts || {}),
+      JSON.stringify(images),
+      now,
+      now,
+      0
+    );
+
+    logger.debug({ key: key.substring(0, 8) }, 'Image cached');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to cache image in database');
+  }
+}
+
+function estimateImageCost(opts?: ImageGenOptions): number {
+  // Estimate cost based on model and sample count
+  const sampleCount = opts?.sampleCount || 1;
+  
+  switch (opts?.model) {
+    case 'imagen-3.0-generate-001': return 0.04 * sampleCount; // STANDARD
+    case 'imagen-3.0-fast-generate-001': return 0.02 * sampleCount; // FAST  
+    case 'imagen-3.0-ultra-generate-001': return 0.08 * sampleCount; // ULTRA
+    default: return 0.04 * sampleCount; // Default to STANDARD
+  }
+}
+
+export function getCacheStats(): CacheStats & { hitRate: number; totalRequests: number } {
+  const totalRequests = cacheStats.memoryHits + cacheStats.memoryMisses;
+  const totalHits = cacheStats.memoryHits + cacheStats.dbHits;
+  const hitRate = totalRequests > 0 ? totalHits / totalRequests : 0;
+
+  return {
+    ...cacheStats,
+    hitRate,
+    totalRequests,
+  };
+}
+
+export function clearCache(): void {
+  memoryCache.clear();
+  try {
+    const db = getDatabase();
+    db.prepare('DELETE FROM image_cache').run();
+    logger.info('Cache cleared');
+  } catch (error) {
+    logger.warn({ error }, 'Failed to clear database cache');
+  }
+}
+
+// Cleanup old cache entries (run periodically)
+export function cleanupCache(): void {
+  try {
+    const db = getDatabase();
+    const deletedRows = db.prepare(`
+      DELETE FROM image_cache
+      WHERE created_at < ?
+    `).run(Date.now() - DB_CACHE_TTL);
+
+    logger.info({ deletedRows: deletedRows.changes }, 'Cache cleanup completed');
+  } catch (error) {
+    logger.warn({ error }, 'Cache cleanup failed');
+  }
+}
+
+// Run cleanup every 6 hours
+setInterval(cleanupCache, 6 * 60 * 60 * 1000);
+```
+
+#### 2.2 Update Database Schema
+
+**File:** `apps/llm-gateway/src/database.ts`
+
+```typescript
+// Add to createTables function
+export function createImageCacheTable(db: Database.Database): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS image_cache (
+      cache_key TEXT PRIMARY KEY,
+      prompt TEXT NOT NULL,
+      options TEXT NOT NULL,
+      images TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      last_accessed INTEGER NOT NULL,
+      hit_count INTEGER NOT NULL DEFAULT 0
+    );
+    
+    CREATE INDEX IF NOT EXISTS idx_image_cache_created ON image_cache(created_at);
+    CREATE INDEX IF NOT EXISTS idx_image_cache_accessed ON image_cache(last_accessed);
+    CREATE INDEX IF NOT EXISTS idx_image_cache_prompt ON image_cache(prompt);
+  `);
+}
+
+// Add call in initDatabase()
+createImageCacheTable(db);
+```
+
+#### 2.3 Update Imagen Implementation
+
+**File:** `apps/llm-gateway/src/utils/imagen.ts`
+
+```typescript
+// Add import
+import { getCachedImage, setCachedImage } from './imageCache.js';
+
+export async function generateImage(prompt: string, opts?: ImageGenOptions): Promise<ImageData[]> {
+  // Check cache first
+  const cachedImages = await getCachedImage(prompt, opts);
+  if (cachedImages) {
+    logger.info({ prompt: prompt.substring(0, 50) }, 'Using cached image');
+    return cachedImages.map((img, index) => ({
+      id: `cached-${Date.now()}-${index}`,
+      mime: img.mime,
+      dataUrl: img.dataUrl,
+    }));
+  }
+
+  // ... existing code for actual generation ...
+
+  // After successful generation, cache the result
+  const imagesToCache = images.map(img => ({
+    mime: img.mime,
+    dataUrl: img.dataUrl,
+  }));
+  
+  await setCachedImage(prompt, opts, imagesToCache);
+
+  return images;
+}
+```
+
+#### 2.4 Add Cache Monitoring Endpoint
+
+**File:** `apps/llm-gateway/src/routes.ts`
+
+```typescript
+// Add cache stats endpoint
+app.get('/api/cache/stats', {
+  schema: {
+    response: {
+      200: {
+        type: 'object',
+        properties: {
+          memoryHits: { type: 'number' },
+          memoryMisses: { type: 'number' },
+          dbHits: { type: 'number' },
+          dbMisses: { type: 'number' },
+          hitRate: { type: 'number' },
+          totalSaved: { type: 'number' },
+          totalRequests: { type: 'number' },
+        },
+      },
+    },
+  },
+}, async (request, reply) => {
+  const stats = getCacheStats();
+  return reply.send(stats);
+});
+
+// Add cache clear endpoint (admin only)
+app.delete('/api/cache', async (request, reply) => {
+  // Add auth check here
+  clearCache();
+  return reply.send({ message: 'Cache cleared' });
+});
+```
+
+### Week 2 Deliverables
+
+- ✅ Multi-layer caching (memory + database)
+- ✅ Prompt normalization for better cache hits
+- ✅ Cache statistics and monitoring
+- ✅ Database schema for persistent cache
+- ✅ Cache cleanup and TTL management
+- ✅ Admin endpoints for cache management
+
+### Week 2 Success Criteria
+
+- Cache hit rate >30% within 48 hours
+- API call reduction >30% for repeated prompts
+- Cache response time <100ms for memory hits
+- Database cache properly persists across restarts
+
+---
+
+## Week 3: Concurrency & Validation
+
+### Objective
+Implement concurrency controls and enhanced validation to prevent abuse and improve system stability.
+
+### Tasks
+
+#### 3.1 Create Concurrency Control Module
+
+**File:** `apps/llm-gateway/src/utils/concurrency.ts`
+
+```typescript
+import pLimit from 'p-limit';
+import { logger } from '../log.js';
+
+// Global limits
+const GLOBAL_CONCURRENT_LIMIT = 10;
+const USER_CONCURRENT_LIMIT = 2;
+const USER_DAILY_LIMIT = 100;
+
+// Per-user limiters
+const userLimiters = new Map<string, ReturnType<typeof pLimit>>();
+const userDailyUsage = new Map<string, { count: number; resetTime: number }>();
+
+// Global limiter
+const globalLimiter = pLimit(GLOBAL_CONCURRENT_LIMIT);
+
+function getUserLimiter(userId: string): ReturnType<typeof pLimit> {
+  if (!userLimiters.has(userId)) {
+    userLimiters.set(userId, pLimit(USER_CONCURRENT_LIMIT));
+  }
+  return userLimiters.get(userId)!;
+}
+
+function checkDailyLimit(userId: string): boolean {
+  const now = Date.now();
+  const usage = userDailyUsage.get(userId);
+  
+  if (!usage || now > usage.resetTime) {
+    // Reset daily count
+    userDailyUsage.set(userId, {
+      count: 0,
+      resetTime: now + 24 * 60 * 60 * 1000, // 24 hours from now
+    });
+    return true;
+  }
+  
+  return usage.count < USER_DAILY_LIMIT;
+}
+
+function incrementDailyUsage(userId: string): void {
+  const usage = userDailyUsage.get(userId);
+  if (usage) {
+    usage.count++;
+  }
+}
+
+export async function withConcurrencyControl<T>(
+  userId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  // Check daily limit
+  if (!checkDailyLimit(userId)) {
+    throw new Error(`Daily image generation limit (${USER_DAILY_LIMIT}) exceeded. Please try again tomorrow.`);
+  }
+
+  const userLimiter = getUserLimiter(userId);
+  
+  return globalLimiter(async () => {
+    return userLimiter(async () => {
+      try {
+        const result = await operation();
+        incrementDailyUsage(userId);
+        return result;
+      } catch (error) {
+        // Don't increment usage on failures
+        throw error;
+      }
+    });
+  });
+}
+
+export function getConcurrencyStats(): {
+  globalActive: number;
+  userLimiters: number;
+  dailyUsage: Array<{ userId: string; count: number; resetTime: number }>;
+} {
+  return {
+    globalActive: globalLimiter.activeCount,
+    userLimiters: userLimiters.size,
+    dailyUsage: Array.from(userDailyUsage.entries()).map(([userId, usage]) => ({
+      userId,
+      count: usage.count,
+      resetTime: usage.resetTime,
+    })),
+  };
+}
+
+// Cleanup inactive limiters every hour
+setInterval(() => {
+  const now = Date.now();
+  
+  // Clean up old daily usage records
+  for (const [userId, usage] of userDailyUsage.entries()) {
+    if (now > usage.resetTime && usage.count === 0) {
+      userDailyUsage.delete(userId);
+    }
+  }
+  
+  // Clean up unused user limiters (this is more complex as p-limit doesn't expose last use time)
+  // For now, just log stats
+  logger.debug({
+    activeLimiters: userLimiters.size,
+    dailyUsageTracked: userDailyUsage.size,
+  }, 'Concurrency cleanup stats');
+}, 60 * 60 * 1000);
+```
+
+#### 3.2 Enhanced Input Validation
+
+**File:** `apps/llm-gateway/src/utils/validation.ts`
+
+```typescript
+export interface ValidationResult {
+  isValid: boolean;
+  errors: string[];
+  warnings: string[];
+}
+
+export interface ImageGenRequest {
+  prompt: string;
+  aspectRatio?: string;
+  sampleCount?: number;
+  model?: string;
+}
+
+const VALID_ASPECT_RATIOS = ['1:1', '9:16', '16:9', '4:3', '3:4'];
+const VALID_MODELS = [
+  'imagen-3.0-generate-001',
+  'imagen-3.0-fast-generate-001', 
+  'imagen-3.0-ultra-generate-001'
+];
+
+const SUSPICIOUS_PATTERNS = [
+  /\b(nude|naked|sex|porn)\b/i,
+  /\b(hitler|nazi|terrorist)\b/i,
+  /\b(kill|murder|violence)\b/i,
+];
+
+export function validateImageGenRequest(request: ImageGenRequest): ValidationResult {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  // Validate prompt
+  if (!request.prompt || typeof request.prompt !== 'string') {
+    errors.push('Prompt is required and must be a string');
+  } else {
+    if (request.prompt.length < 3) {
+      errors.push('Prompt must be at least 3 characters long');
+    }
+    
+    if (request.prompt.length > 4000) {
+      errors.push('Prompt exceeds maximum length of 4000 characters');
+    }
+    
+    // Check for suspicious content
+    for (const pattern of SUSPICIOUS_PATTERNS) {
+      if (pattern.test(request.prompt)) {
+        warnings.push('Prompt may contain content that violates usage policies');
+        break;
+      }
+    }
+    
+    // Check for very repetitive content
+    const words = request.prompt.toLowerCase().split(/\s+/);
+    const uniqueWords = new Set(words);
+    if (words.length > 20 && uniqueWords.size / words.length < 0.3) {
+      warnings.push('Prompt appears very repetitive and may not generate good results');
+    }
+  }
+
+  // Validate aspect ratio
+  if (request.aspectRatio && !VALID_ASPECT_RATIOS.includes(request.aspectRatio)) {
+    errors.push(`Invalid aspect ratio. Must be one of: ${VALID_ASPECT_RATIOS.join(', ')}`);
+  }
+
+  // Validate sample count
+  if (request.sampleCount !== undefined) {
+    if (!Number.isInteger(request.sampleCount) || request.sampleCount < 1 || request.sampleCount > 4) {
+      errors.push('Sample count must be an integer between 1 and 4');
+    }
+    
+    if (request.sampleCount > 2) {
+      warnings.push('Generating more than 2 images increases cost significantly');
+    }
+  }
+
+  // Validate model
+  if (request.model && !VALID_MODELS.includes(request.model)) {
+    errors.push(`Invalid model. Must be one of: ${VALID_MODELS.join(', ')}`);
+  }
+
+  return {
+    isValid: errors.length === 0,
+    errors,
+    warnings,
+  };
+}
+
+export function sanitizePrompt(prompt: string): string {
+  return prompt
+    .trim()
+    .replace(/\s+/g, ' ') // Normalize whitespace
+    .replace(/[^\w\s.,!?-]/g, '') // Remove special characters except basic punctuation
+    .substring(0, 4000); // Enforce max length
+}
+
+export function estimatePromptComplexity(prompt: string): number {
+  const words = prompt.toLowerCase().split(/\s+/);
+  
+  const complexWords = [
+    'detailed', 'realistic', 'photorealistic', '4k', '8k', 'hd', 'ultra',
+    'cinematic', 'dramatic', 'professional', 'studio', 'lighting',
+    'intricate', 'elaborate', 'sophisticated', 'complex'
+  ];
+  
+  const complexWordCount = words.filter(word => 
+    complexWords.some(complex => word.includes(complex))
+  ).length;
+  
+  return Math.min(complexWordCount / 10, 1);
+}
+```
+
+#### 3.3 Update Routes with Validation
+
+**File:** `apps/llm-gateway/src/routes.ts`
+
+```typescript
+// Add imports
+import { withConcurrencyControl } from './utils/concurrency.js';
+import { validateImageGenRequest, sanitizePrompt } from './utils/validation.js';
+
+// Update image generation endpoint
+app.post('/api/chat/stream/:threadId/generate-image', {
+  schema: {
+    body: {
+      type: 'object',
+      properties: {
+        prompt: { type: 'string' },
+        aspectRatio: { type: 'string' },
+        sampleCount: { type: 'number' },
+        model: { type: 'string' },
+      },
+      required: ['prompt'],
+    },
+  },
+}, async (request, reply) => {
+  const { threadId } = request.params as { threadId: string };
+  const body = request.body as any;
+  const userId = request.headers['x-user-id'] as string;
+
+  if (!userId) {
+    return reply.code(401).send({ error: 'User ID required' });
+  }
+
+  // Validate request
+  const validation = validateImageGenRequest(body);
+  if (!validation.isValid) {
+    return reply.code(400).send({ 
+      error: 'Validation failed',
+      details: validation.errors 
+    });
+  }
+
+  // Log warnings
+  if (validation.warnings.length > 0) {
+    logger.warn({ warnings: validation.warnings, userId }, 'Image generation warnings');
+  }
+
+  // Sanitize prompt
+  const sanitizedPrompt = sanitizePrompt(body.prompt);
+
+  try {
+    const result = await withConcurrencyControl(userId, async () => {
+      return await generateImage(sanitizedPrompt, {
+        aspectRatio: body.aspectRatio,
+        sampleCount: body.sampleCount,
+        model: body.model,
+      });
+    });
+
+    // ... rest of existing code ...
+  } catch (error: any) {
+    if (error.message.includes('Daily image generation limit')) {
+      return reply.code(429).send({ error: error.message });
+    }
+    
+    // ... existing error handling ...
+  }
+});
+```
+
+### Week 3 Deliverables
+
+- ✅ User-level concurrency limits (2 concurrent requests)
+- ✅ Global concurrency limits (10 total requests)
+- ✅ Daily usage limits per user (100 images/day)
+- ✅ Enhanced input validation with warnings
+- ✅ Prompt sanitization and complexity estimation
+- ✅ Rate limiting for repeated failures
+
+### Week 3 Success Criteria
+
+- No user can exceed concurrency limits
+- Daily limits prevent abuse
+- Invalid requests rejected with clear error messages
+- System remains stable under high load
+
+---
+
+## Week 4: Storage Migration
+
+### Objective
+Migrate from base64 database storage to object storage (S3/GCS/R2) for better performance and cost efficiency.
+
+### Tasks
+
+#### 4.1 Create Storage Abstraction
+
+**File:** `apps/llm-gateway/src/utils/storage.ts`
+
+```typescript
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { createHash } from 'crypto';
+import { logger } from '../log.js';
+
+export interface StorageProvider {
+  uploadImage(imageData: Buffer, contentType: string, metadata?: Record<string, string>): Promise<string>;
+  getImageUrl(key: string, expiresIn?: number): Promise<string>;
+  deleteImage(key: string): Promise<void>;
+}
+
+class S3StorageProvider implements StorageProvider {
+  private client: S3Client;
+  private bucket: string;
+  private region: string;
+  private cdnDomain?: string;
+
+  constructor() {
+    this.bucket = process.env.S3_BUCKET || '';
+    this.region = process.env.AWS_REGION || 'us-east-1';
+    this.cdnDomain = process.env.CDN_DOMAIN;
+    
+    this.client = new S3Client({
+      region: this.region,
+      credentials: {
+        accessKeyId: process.env.AWS_ACCESS_KEY_ID || '',
+        secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY || '',
+      },
+    });
+
+    if (!this.bucket) {
+      throw new Error('S3_BUCKET environment variable is required');
+    }
+  }
+
+  async uploadImage(imageData: Buffer, contentType: string, metadata: Record<string, string> = {}): Promise<string> {
+    // Generate unique key
+    const hash = createHash('sha256').update(imageData).digest('hex');
+    const extension = contentType.split('/')[1] || 'png';
+    const key = `images/${new Date().getFullYear()}/${new Date().getMonth() + 1}/${hash}.${extension}`;
+
+    try {
+      await this.client.send(new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: imageData,
+        ContentType: contentType,
+        Metadata: {
+          ...metadata,
+          uploadTime: Date.now().toString(),
+        },
+        // Cache for 1 year
+        CacheControl: 'public, max-age=31536000, immutable',
+      }));
+
+      logger.debug({ key, size: imageData.length }, 'Image uploaded to S3');
+      return key;
+    } catch (error) {
+      logger.error({ error, key }, 'Failed to upload image to S3');
+      throw new Error('Failed to upload image to storage');
+    }
+  }
+
+  async getImageUrl(key: string, expiresIn: number = 3600): Promise<string> {
+    // Use CDN if available for public access
+    if (this.cdnDomain && expiresIn >= 3600) {
+      return `https://${this.cdnDomain}/${key}`;
+    }
+
+    // Generate signed URL for temporary access
+    try {
+      const command = new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      });
+
+      const signedUrl = await getSignedUrl(this.client, command, { expiresIn });
+      return signedUrl;
+    } catch (error) {
+      logger.error({ error, key }, 'Failed to generate signed URL');
+      throw new Error('Failed to generate image URL');
+    }
+  }
+
+  async deleteImage(key: string): Promise<void> {
+    try {
+      await this.client.send(new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      }));
+
+      logger.debug({ key }, 'Image deleted from S3');
+    } catch (error) {
+      logger.error({ error, key }, 'Failed to delete image from S3');
+      throw new Error('Failed to delete image from storage');
+    }
+  }
+}
+
+// Storage factory
+export function createStorageProvider(): StorageProvider {
+  const provider = process.env.STORAGE_PROVIDER || 's3';
+  
+  switch (provider.toLowerCase()) {
+    case 's3':
+      return new S3StorageProvider();
+    // Add other providers (GCS, R2, etc.) here
+    default:
+      throw new Error(`Unsupported storage provider: ${provider}`);
+  }
+}
+
+// Singleton instance
+let storageInstance: StorageProvider | null = null;
+
+export function getStorage(): StorageProvider {
+  if (!storageInstance) {
+    storageInstance = createStorageProvider();
+  }
+  return storageInstance;
+}
+```
+
+#### 4.2 Update Database Schema
+
+**File:** `apps/llm-gateway/src/database.ts`
+
+```typescript
+// Add migration for artifacts table
+export function migrateArtifactsToStorage(db: Database.Database): void {
+  // Add storage columns
+  db.exec(`
+    ALTER TABLE artifacts ADD COLUMN storage_key TEXT;
+    ALTER TABLE artifacts ADD COLUMN storage_url TEXT;
+    ALTER TABLE artifacts ADD COLUMN migrated_at INTEGER;
+  `);
+
+  // Create index for storage lookups
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_artifacts_storage_key ON artifacts(storage_key);
+  `);
+
+  logger.info('Artifacts table migrated for storage support');
+}
+
+// Update image cache table
+export function updateImageCacheSchema(db: Database.Database): void {
+  db.exec(`
+    ALTER TABLE image_cache ADD COLUMN storage_keys TEXT; -- JSON array of storage keys
+    ALTER TABLE image_cache ADD COLUMN storage_migrated INTEGER DEFAULT 0;
+  `);
+}
+```
+
+#### 4.3 Create Migration Script
+
+**File:** `apps/llm-gateway/src/scripts/migrate-to-storage.ts`
+
+```typescript
+import { getDatabase } from '../database.js';
+import { getStorage } from '../utils/storage.js';
+import { logger } from '../log.js';
+
+interface ArtifactRow {
+  id: string;
+  data: string;
+  storage_key?: string;
+  migrated_at?: number;
+}
+
+async function migrateArtifactsToStorage(): Promise<void> {
+  const db = getDatabase();
+  const storage = getStorage();
+  
+  // Get all artifacts that need migration
+  const artifacts = db.prepare(`
+    SELECT id, data, storage_key, migrated_at
+    FROM artifacts
+    WHERE type = 'image' AND storage_key IS NULL
+    ORDER BY created_at DESC
+    LIMIT 100
+  `).all() as ArtifactRow[];
+
+  logger.info({ count: artifacts.length }, 'Starting artifact migration');
+
+  let migrated = 0;
+  let failed = 0;
+
+  for (const artifact of artifacts) {
+    try {
+      const artifactData = JSON.parse(artifact.data);
+      
+      if (artifactData.images && Array.isArray(artifactData.images)) {
+        const storageKeys: string[] = [];
+        
+        for (const image of artifactData.images) {
+          if (image.dataUrl && image.dataUrl.startsWith('data:')) {
+            // Extract base64 data
+            const [header, base64Data] = image.dataUrl.split(',');
+            const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
+            const imageBuffer = Buffer.from(base64Data, 'base64');
+            
+            // Upload to storage
+            const storageKey = await storage.uploadImage(imageBuffer, mimeType, {
+              artifactId: artifact.id,
+              originalMime: image.mime || mimeType,
+            });
+            
+            storageKeys.push(storageKey);
+            
+            // Replace dataUrl with storage URL
+            image.storageKey = storageKey;
+            image.dataUrl = await storage.getImageUrl(storageKey, 86400); // 24 hour URL
+          }
+        }
+        
+        // Update artifact with new data and storage keys
+        db.prepare(`
+          UPDATE artifacts
+          SET data = ?, storage_key = ?, migrated_at = ?
+          WHERE id = ?
+        `).run(
+          JSON.stringify(artifactData),
+          JSON.stringify(storageKeys),
+          Date.now(),
+          artifact.id
+        );
+        
+        migrated++;
+        logger.debug({ artifactId: artifact.id, imageCount: storageKeys.length }, 'Artifact migrated');
+      }
+    } catch (error) {
+      failed++;
+      logger.error({ error, artifactId: artifact.id }, 'Failed to migrate artifact');
+    }
+  }
+
+  logger.info({ migrated, failed }, 'Artifact migration completed');
+}
+
+async function migrateCacheToStorage(): Promise<void> {
+  const db = getDatabase();
+  const storage = getStorage();
+  
+  // Similar migration for cache table
+  const cacheEntries = db.prepare(`
+    SELECT cache_key, images, storage_migrated
+    FROM image_cache
+    WHERE storage_migrated = 0
+    LIMIT 50
+  `).all() as Array<{ cache_key: string; images: string; storage_migrated: number }>;
+
+  logger.info({ count: cacheEntries.length }, 'Starting cache migration');
+
+  for (const entry of cacheEntries) {
+    try {
+      const images = JSON.parse(entry.images);
+      const storageKeys: string[] = [];
+      
+      for (const image of images) {
+        if (image.dataUrl && image.dataUrl.startsWith('data:')) {
+          const [header, base64Data] = image.dataUrl.split(',');
+          const mimeType = header.match(/data:([^;]+)/)?.[1] || 'image/png';
+          const imageBuffer = Buffer.from(base64Data, 'base64');
+          
+          const storageKey = await storage.uploadImage(imageBuffer, mimeType, {
+            cacheKey: entry.cache_key,
+          });
+          
+          storageKeys.push(storageKey);
+          image.storageKey = storageKey;
+          image.dataUrl = await storage.getImageUrl(storageKey, 86400);
+        }
+      }
+      
+      db.prepare(`
+        UPDATE image_cache
+        SET images = ?, storage_keys = ?, storage_migrated = 1
+        WHERE cache_key = ?
+      `).run(
+        JSON.stringify(images),
+        JSON.stringify(storageKeys),
+        entry.cache_key
+      );
+      
+      logger.debug({ cacheKey: entry.cache_key }, 'Cache entry migrated');
+    } catch (error) {
+      logger.error({ error, cacheKey: entry.cache_key }, 'Failed to migrate cache entry');
+    }
+  }
+}
+
+// CLI script
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const command = process.argv[2];
+  
+  switch (command) {
+    case 'artifacts':
+      await migrateArtifactsToStorage();
+      break;
+    case 'cache':
+      await migrateCacheToStorage();
+      break;
+    case 'all':
+      await migrateArtifactsToStorage();
+      await migrateCacheToStorage();
+      break;
+    default:
+      console.log('Usage: tsx migrate-to-storage.ts [artifacts|cache|all]');
+      process.exit(1);
+  }
+}
+```
+
+#### 4.4 Update Image Generation
+
+**File:** `apps/llm-gateway/src/utils/imagen.ts`
+
+```typescript
+import { getStorage } from './storage.js';
+
+export async function generateImage(prompt: string, opts?: ImageGenOptions): Promise<ImageData[]> {
+  // ... existing cache check and generation logic ...
+
+  const storage = getStorage();
+  const processedImages: ImageData[] = [];
+
+  for (const [index, pred] of predictions.entries()) {
+    try {
+      // Convert base64 to buffer
+      const imageBuffer = Buffer.from(pred.bytesBase64Encoded, 'base64');
+      
+      // Upload to storage
+      const storageKey = await storage.uploadImage(imageBuffer, 'image/png', {
+        prompt: prompt.substring(0, 100),
+        model: opts?.model || 'standard',
+        aspectRatio: opts?.aspectRatio || '1:1',
+        generatedAt: Date.now().toString(),
+      });
+      
+      // Get public URL (long expiry for caching)
+      const imageUrl = await storage.getImageUrl(storageKey, 86400 * 7); // 7 days
+      
+      processedImages.push({
+        id: `img-${Date.now()}-${index}`,
+        mime: 'image/png',
+        dataUrl: imageUrl,
+        storageKey,
+      });
+    } catch (error) {
+      logger.error({ error, index }, 'Failed to process generated image');
+      // Fallback to base64 if storage fails
+      processedImages.push({
+        id: `img-${Date.now()}-${index}`,
+        mime: 'image/png',
+        dataUrl: `data:image/png;base64,${pred.bytesBase64Encoded}`,
+      });
+    }
+  }
+
+  // ... existing caching and return logic ...
+}
+```
+
+### Week 4 Deliverables
+
+- ✅ Storage abstraction layer (S3 compatible)
+- ✅ Database schema migration for storage keys
+- ✅ Migration script for existing data
+- ✅ Updated image generation to use storage
+- ✅ CDN integration for faster delivery
+- ✅ Cleanup scripts for old base64 data
+
+### Week 4 Success Criteria
+
+- All new images stored in object storage
+- Database size reduced by 70%+ after migration
+- Image loading times improved with CDN
+- Migration completed without data loss
+
+---
+
+## Code Templates
+
+### Environment Variables
+
+```bash
+# .env additions for Week 4
+STORAGE_PROVIDER=s3
+S3_BUCKET=your-imagen-bucket
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=your-access-key
+AWS_SECRET_ACCESS_KEY=your-secret-key
+CDN_DOMAIN=images.yourdomain.com
+
+# Optional: for other providers
+# GCS_BUCKET=your-gcs-bucket
+# CLOUDFLARE_R2_ENDPOINT=your-r2-endpoint
+```
+
+### Docker Compose Updates
+
+```yaml
+# docker-compose.yml additions
+services:
+  llm-gateway:
+    environment:
+      - STORAGE_PROVIDER=s3
+      - S3_BUCKET=${S3_BUCKET}
+      - AWS_REGION=${AWS_REGION}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - CDN_DOMAIN=${CDN_DOMAIN}
+```
+
+### Package.json Updates
+
+```json
+{
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.450.0",
+    "@aws-sdk/s3-request-presigner": "^3.450.0",
+    "p-limit": "^4.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^0.34.0"
+  },
+  "scripts": {
+    "migrate-storage": "tsx src/scripts/migrate-to-storage.ts all",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  }
+}
+```
+
+---
+
+## Testing Strategy
+
+### Unit Tests
+
+```typescript
+// apps/llm-gateway/src/utils/__tests__/imageCache.test.ts
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { getCachedImage, setCachedImage } from '../imageCache.js';
+
+describe('imageCache', () => {
+  beforeEach(() => {
+    // Clear cache before each test
+    vi.clearAllMocks();
+  });
+
+  it('should cache and retrieve images', async () => {
+    const prompt = 'test prompt';
+    const images = [{ mime: 'image/png', dataUrl: 'data:image/png;base64,test' }];
+    
+    await setCachedImage(prompt, undefined, images);
+    const cached = await getCachedImage(prompt, undefined);
+    
+    expect(cached).toEqual(images);
+  });
+
+  it('should normalize prompts for better cache hits', async () => {
+    const images = [{ mime: 'image/png', dataUrl: 'data:image/png;base64,test' }];
+    
+    await setCachedImage('  Test Prompt  ', undefined, images);
+    const cached = await getCachedImage('test prompt', undefined);
+    
+    expect(cached).toEqual(images);
+  });
+});
+```
+
+### Integration Tests
+
+```typescript
+// apps/llm-gateway/src/__tests__/imagen-integration.test.ts
+import { describe, it, expect } from 'vitest';
+import { generateImage } from '../utils/imagen.js';
+
+describe('imagen integration', () => {
+  it('should generate image with retry logic', async () => {
+    const result = await generateImage('a simple test image');
+    
+    expect(result).toBeDefined();
+    expect(result.length).toBeGreaterThan(0);
+    expect(result[0]).toHaveProperty('dataUrl');
+    expect(result[0]).toHaveProperty('mime');
+  });
+
+  it('should use cache for identical prompts', async () => {
+    const prompt = 'cached test image';
+    
+    const result1 = await generateImage(prompt);
+    const result2 = await generateImage(prompt);
+    
+    // Second call should be faster (cached)
+    expect(result1).toEqual(result2);
+  });
+});
+```
+
+### Load Testing
+
+```typescript
+// scripts/load-test.ts
+import { generateImage } from '../src/utils/imagen.js';
+
+async function loadTest() {
+  const concurrentRequests = 10;
+  const requestsPerUser = 5;
+  
+  const promises: Promise<any>[] = [];
+  
+  for (let user = 0; user < concurrentRequests; user++) {
+    for (let req = 0; req < requestsPerUser; req++) {
+      promises.push(
+        generateImage(`test image ${user}-${req}`)
+          .then(() => ({ success: true, user, req }))
+          .catch(error => ({ success: false, user, req, error: error.message }))
+      );
+    }
+  }
+  
+  const results = await Promise.all(promises);
+  const successful = results.filter(r => r.success).length;
+  const failed = results.filter(r => !r.success).length;
+  
+  console.log(`Load test completed: ${successful} successful, ${failed} failed`);
+}
+
+loadTest().catch(console.error);
+```
+
+---
+
+## Monitoring Setup
+
+### Metrics Dashboard
+
+```typescript
+// apps/llm-gateway/src/utils/metrics.ts
+export interface Metrics {
+  imageGeneration: {
+    total: number;
+    successful: number;
+    failed: number;
+    cached: number;
+    averageLatency: number;
+    totalCost: number;
+  };
+  cache: {
+    hitRate: number;
+    memoryHits: number;
+    dbHits: number;
+    totalSaved: number;
+  };
+  errors: {
+    retries: number;
+    timeouts: number;
+    rateLimits: number;
+    contentPolicy: number;
+  };
+}
+
+class MetricsCollector {
+  private metrics: Metrics = {
+    imageGeneration: {
+      total: 0,
+      successful: 0,
+      failed: 0,
+      cached: 0,
+      averageLatency: 0,
+      totalCost: 0,
+    },
+    cache: {
+      hitRate: 0,
+      memoryHits: 0,
+      dbHits: 0,
+      totalSaved: 0,
+    },
+    errors: {
+      retries: 0,
+      timeouts: 0,
+      rateLimits: 0,
+      contentPolicy: 0,
+    },
+  };
+
+  recordImageGeneration(success: boolean, latency: number, cost: number, cached: boolean): void {
+    this.metrics.imageGeneration.total++;
+    if (success) this.metrics.imageGeneration.successful++;
+    else this.metrics.imageGeneration.failed++;
+    if (cached) this.metrics.imageGeneration.cached++;
+    
+    this.metrics.imageGeneration.averageLatency = 
+      (this.metrics.imageGeneration.averageLatency * (this.metrics.imageGeneration.total - 1) + latency) / 
+      this.metrics.imageGeneration.total;
+    
+    this.metrics.imageGeneration.totalCost += cost;
+  }
+
+  getMetrics(): Metrics {
+    return { ...this.metrics };
+  }
+}
+
+export const metricsCollector = new MetricsCollector();
+```
+
+### Health Check Endpoint
+
+```typescript
+// Add to routes.ts
+app.get('/health', async (request, reply) => {
+  const health = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    services: {
+      database: await checkDatabase(),
+      storage: await checkStorage(),
+      cache: await checkCache(),
+    },
+    metrics: metricsCollector.getMetrics(),
+  };
+
+  const isHealthy = Object.values(health.services).every(service => service.status === 'ok');
+  
+  return reply
+    .code(isHealthy ? 200 : 503)
+    .send(health);
+});
+
+async function checkDatabase(): Promise<{ status: string; latency?: number }> {
+  try {
+    const start = Date.now();
+    const db = getDatabase();
+    db.prepare('SELECT 1').get();
+    const latency = Date.now() - start;
+    return { status: 'ok', latency };
+  } catch (error) {
+    return { status: 'error' };
+  }
+}
+
+async function checkStorage(): Promise<{ status: string }> {
+  try {
+    const storage = getStorage();
+    // Simple check - could be more sophisticated
+    return { status: 'ok' };
+  } catch (error) {
+    return { status: 'error' };
+  }
+}
+
+async function checkCache(): Promise<{ status: string; hitRate?: number }> {
+  try {
+    const stats = getCacheStats();
+    return { status: 'ok', hitRate: stats.hitRate };
+  } catch (error) {
+    return { status: 'error' };
+  }
+}
+```
+
+---
+
+## Rollback Plans
+
+### Week 1 Rollback (Retry Logic)
+
+If retry logic causes issues:
+
+1. **Immediate:** Disable retries by setting `maxRetries: 0`
+2. **Revert:** Remove retry logic and restore original fetch calls
+3. **Alternative:** Implement simplified retry (only for 500 errors)
+
+```typescript
+// Emergency rollback - disable retries
+const EMERGENCY_DISABLE_RETRIES = process.env.DISABLE_RETRIES === 'true';
+
+export async function generateImage(prompt: string, opts?: ImageGenOptions): Promise<ImageData[]> {
+  if (EMERGENCY_DISABLE_RETRIES) {
+    // Use original fetch logic
+    const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    // ... original logic
+  } else {
+    // Use retry logic
+    const response = await fetchWithRetry(url, options);
+    // ... new logic
+  }
+}
+```
+
+### Week 2 Rollback (Caching)
+
+If caching causes issues:
+
+1. **Immediate:** Disable cache reads with feature flag
+2. **Partial:** Keep cache writes, disable cache reads
+3. **Full revert:** Remove caching entirely
+
+```typescript
+// Feature flags for gradual rollback
+const CACHE_READS_ENABLED = process.env.CACHE_READS_ENABLED !== 'false';
+const CACHE_WRITES_ENABLED = process.env.CACHE_WRITES_ENABLED !== 'false';
+
+export async function generateImage(prompt: string, opts?: ImageGenOptions): Promise<ImageData[]> {
+  // Check cache only if enabled
+  if (CACHE_READS_ENABLED) {
+    const cached = await getCachedImage(prompt, opts);
+    if (cached) return cached;
+  }
+
+  // ... generate image ...
+
+  // Cache only if enabled
+  if (CACHE_WRITES_ENABLED) {
+    await setCachedImage(prompt, opts, images);
+  }
+
+  return images;
+}
+```
+
+### Week 3 Rollback (Concurrency)
+
+If concurrency limits cause issues:
+
+1. **Increase limits:** Double the limits temporarily
+2. **Disable user limits:** Keep only global limits
+3. **Full disable:** Remove all concurrency controls
+
+```typescript
+// Emergency concurrency adjustments
+const EMERGENCY_HIGH_LIMITS = process.env.EMERGENCY_HIGH_LIMITS === 'true';
+const USER_LIMIT = EMERGENCY_HIGH_LIMITS ? 10 : 2;
+const GLOBAL_LIMIT = EMERGENCY_HIGH_LIMITS ? 50 : 10;
+```
+
+### Week 4 Rollback (Storage)
+
+If storage migration causes issues:
+
+1. **Immediate:** Stop new uploads to storage, use base64 fallback
+2. **Hybrid:** New images to storage, serve old images from database
+3. **Full revert:** Migrate storage images back to database
+
+```typescript
+// Storage fallback strategy
+const STORAGE_ENABLED = process.env.STORAGE_ENABLED !== 'false';
+
+if (STORAGE_ENABLED) {
+  try {
+    const storageKey = await storage.uploadImage(imageBuffer, 'image/png');
+    const imageUrl = await storage.getImageUrl(storageKey);
+    // Use storage URL
+  } catch (error) {
+    logger.warn('Storage failed, falling back to base64');
+    // Fallback to base64
+    const dataUrl = `data:image/png;base64,${base64Data}`;
+  }
+} else {
+  // Always use base64
+  const dataUrl = `data:image/png;base64,${base64Data}`;
+}
+```
+
+---
+
+## Success Metrics & KPIs
+
+### Performance Metrics
+
+- **Image Generation Latency:** Target <15s (down from 20-30s)
+- **Cache Hit Response:** Target <2s for cache hits
+- **Error Rate:** Target <5% (down from unknown baseline)
+- **Retry Success Rate:** Target >80% for retryable errors
+
+### Cost Metrics
+
+- **API Cost Reduction:** Target 40-65% reduction
+- **Database Storage:** Target 70% reduction after migration
+- **CDN Cost:** Target <10% of original image serving cost
+
+### User Experience Metrics
+
+- **Failed Generation Rate:** Target <5%
+- **Loading State Feedback:** 100% of requests show progress
+- **Error Message Clarity:** 100% of errors have actionable messages
+
+### System Health Metrics
+
+- **Uptime:** Target 99.9%
+- **Concurrent Request Handling:** Handle 10+ concurrent users
+- **Daily Throughput:** Support 1000+ images/day per instance
+
+---
+
+## Conclusion
+
+This blueprint provides a comprehensive roadmap for optimizing your Imagen4 implementation. The phased approach ensures:
+
+1. **Immediate reliability improvements** (Week 1)
+2. **Significant cost reduction** (Week 2)
+3. **System scalability** (Week 3)
+4. **Long-term architecture** (Week 4)
+
+**Estimated Total Impact:**
+- **Cost Reduction:** 40-65%
+- **Performance Improvement:** 2-3x for cached requests
+- **Reliability Improvement:** 90%+ reduction in failed requests
+- **User Experience:** Significantly improved with better feedback
+
+**Next Steps:**
+1. Set up monitoring and metrics collection
+2. Begin Week 1 implementation with retry logic
+3. Run tests after each phase
+4. Monitor metrics and adjust as needed
+
+**Implementation Timeline:** 4 weeks total effort, with each week building on the previous improvements.
+
+---
+
+*This blueprint serves as a living document. Update it based on your specific requirements, infrastructure, and lessons learned during implementation.*

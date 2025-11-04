@@ -3,9 +3,12 @@ import { useAuth } from "@clerk/clerk-react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { Settings, Plus, Trash2, BarChart3 } from "../../icons";
+import { Layers } from "lucide-react";
 import { useChatStore } from "../../store/chatStore";
+import { useUIStore } from "../../store/uiStore";
 import { cn } from "../../lib/utils";
 import SettingsDialog from "../settings/SettingsDialog";
+import ArtifactsDialog from "../settings/ArtifactsDialog";
 import { deleteConversation as deleteConversationApi } from "../../services/gateway";
 import { toastPromise } from "../../utils/toastPromise";
 import { notify } from "../../utils/toast";
@@ -17,9 +20,11 @@ const SidebarBase: React.FC = () => {
   const [expanded,setExpanded]=useState(false);
   const [hoverTimeout, setHoverTimeout] = useState<NodeJS.Timeout | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [artifactsOpen, setArtifactsOpen] = useState(false);
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const conversations = useChatStore(s => s.conversations);
+  const setSidebarExpanded = useUIStore(s => s.setSidebarExpanded);
   // Memoize conversations list to provide stable reference
   const items = useMemo<ConversationItem[]>(
     () => conversations.map(c => ({ id: c.id, title: c.title })),
@@ -36,13 +41,19 @@ const SidebarBase: React.FC = () => {
   
   const handleMouseEnter = () => {
     if (hoverTimeout) clearTimeout(hoverTimeout);
-    const timeout = setTimeout(() => setExpanded(true), 50);
+    const timeout = setTimeout(() => {
+      setExpanded(true);
+      setSidebarExpanded(true);
+    }, 50);
     setHoverTimeout(timeout);
   };
   
   const handleMouseLeave = () => {
     if (hoverTimeout) clearTimeout(hoverTimeout);
-    const timeout = setTimeout(() => setExpanded(false), 300);
+    const timeout = setTimeout(() => {
+      setExpanded(false);
+      setSidebarExpanded(false);
+    }, 300);
     setHoverTimeout(timeout);
   };
 
@@ -170,8 +181,24 @@ const SidebarBase: React.FC = () => {
             </nav>
           )}
 
-          {/* Bottom Section: Dashboard and Settings - Sticky */}
+          {/* Bottom Section: Artifacts, Dashboard and Settings - Sticky */}
           <div className="mt-auto sticky bottom-0 px-1 pb-3 pt-2 space-y-1 bg-[#0f0f0f]/95 backdrop-blur-sm border-t border-white/10">
+            {/* Artifacts Button */}
+            <button
+              onClick={() => setArtifactsOpen(true)}
+              className={cn(
+                "flex items-center gap-3 rounded-xl px-2 py-2 text-white/70 hover:text-white/90 hover:bg-white/5 w-full transition-all",
+                artifactsOpen ? 'bg-white/10' : ''
+              )}
+              aria-label="Artifacts"
+            >
+              <Layers className="h-5 w-5 flex-shrink-0"/>
+              <span className={cn(
+                "transition-opacity duration-300",
+                expanded ? "opacity-100 text-base" : "opacity-0 text-sm"
+              )}>Artifacts</span>
+            </button>
+
             {/* Dashboard Button */}
             <button
               onClick={() => {
@@ -213,6 +240,7 @@ const SidebarBase: React.FC = () => {
       </aside>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <ArtifactsDialog open={artifactsOpen} onOpenChange={setArtifactsOpen} />
     </>
   );
 };

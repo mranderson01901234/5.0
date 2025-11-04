@@ -32,13 +32,42 @@ if [ ! -f .env ]; then
     echo -e "${RED}❌ Error: .env file not found in root directory${NC}"
     echo -e "${YELLOW}Please create .env file with required API keys${NC}"
     echo -e "${CYAN}Required keys:${NC}"
-    echo -e "  - OPENAI_API_KEY (for embeddings)"
+    echo -e "  - GOOGLE_API_KEY (for Gemini LLM - default model)"
+    echo -e "  - OPENAI_API_KEY (for embeddings and optional GPT models)"
     echo -e "  - BRAVE_API_KEY (for web search)"
-    echo -e "  - ANTHROPIC_API_KEY or OPENAI_API_KEY (for LLM)"
+    echo -e "  - ANTHROPIC_API_KEY (optional, for Claude models)"
+    echo -e "  - CLERK_SECRET_KEY (for authentication)"
     exit 1
 fi
 
+# Load .env to check for keys
+source .env 2>/dev/null || true
+
 echo -e "${BLUE}📋 Pre-flight checks...${NC}"
+
+# Check for critical API keys
+MISSING_KEYS=()
+if [ -z "$GOOGLE_API_KEY" ]; then
+    MISSING_KEYS+=("GOOGLE_API_KEY")
+fi
+if [ -z "$OPENAI_API_KEY" ]; then
+    MISSING_KEYS+=("OPENAI_API_KEY")
+fi
+if [ -z "$BRAVE_API_KEY" ]; then
+    MISSING_KEYS+=("BRAVE_API_KEY")
+fi
+if [ -z "$CLERK_SECRET_KEY" ]; then
+    MISSING_KEYS+=("CLERK_SECRET_KEY")
+fi
+
+if [ ${#MISSING_KEYS[@]} -gt 0 ]; then
+    echo -e "${YELLOW}⚠️  Missing API keys in .env:${NC}"
+    for key in "${MISSING_KEYS[@]}"; do
+        echo -e "  ${RED}  - $key${NC}"
+    done
+    echo -e "${YELLOW}Some features may not work without these keys${NC}"
+    echo ""
+fi
 
 # Function to check if port is in use
 check_port() {
@@ -55,8 +84,11 @@ kill_port() {
     local service=$2
     if check_port $port; then
         echo -e "${YELLOW}⚠️  Port $port is in use ($service), killing existing process...${NC}"
-        lsof -ti:$port | xargs kill -9 2>/dev/null || true
-        sleep 1
+        local pids=$(lsof -ti:$port 2>/dev/null)
+        if [ -n "$pids" ]; then
+            echo "$pids" | xargs kill -9 2>/dev/null || true
+            sleep 1
+        fi
     fi
 }
 
@@ -74,6 +106,7 @@ sleep 2  # Give processes time to exit
 kill_port 8787 "Gateway"
 kill_port 3001 "Memory Service"
 kill_port 3002 "Hybrid RAG"
+kill_port 3003 "Ingestion Service (if enabled)"
 kill_port 5173 "Web UI"
 kill_port 6333 "Qdrant (optional)"
 
@@ -98,6 +131,47 @@ else
     echo -e "${CYAN}   To enable: docker run -d -p 6333:6333 --name qdrant qdrant/qdrant${NC}"
 fi
 
+# Check for Redis (required for Phase 7: telemetry, export queue, WebSocket)
+echo -e "${BLUE}🔍 Checking Redis...${NC}"
+REDIS_AVAILABLE=false
+if command -v redis-cli > /dev/null 2>&1; then
+    if redis-cli ping > /dev/null 2>&1; then
+        echo -e "${GREEN}✅ Redis is running (telemetry, export queue, and WebSocket enabled)${NC}"
+        REDIS_AVAILABLE=true
+    else
+        echo -e "${RED}❌ Redis is not responding${NC}"
+        echo -e "${YELLOW}   Phase 7 features (telemetry, export queue, WebSocket) will be disabled${NC}"
+        echo -e "${CYAN}   To start Redis:${NC}"
+        echo -e "${CYAN}     - Linux: sudo systemctl start redis${NC}"
+        echo -e "${CYAN}     - macOS: brew services start redis${NC}"
+        echo -e "${CYAN}     - Docker: docker run -d -p 6379:6379 redis:alpine${NC}"
+        echo -e "${YELLOW}   Continuing without Redis...${NC}"
+    fi
+else
+    echo -e "${YELLOW}⚠️  redis-cli not found (Redis may not be installed)${NC}"
+    echo -e "${YELLOW}   Phase 7 features (telemetry, export queue, WebSocket) will be disabled${NC}"
+    echo -e "${CYAN}   To install Redis:${NC}"
+    echo -e "${CYAN}     - Linux: sudo apt-get install redis-server${NC}"
+    echo -e "${CYAN}     - macOS: brew install redis${NC}"
+    echo -e "${CYAN}     - Docker: docker run -d -p 6379:6379 redis:alpine${NC}"
+    echo -e "${YELLOW}   Continuing without Redis...${NC}"
+fi
+
+# Check if ingestion service should be started (default: disabled)
+# Read from .env file directly to avoid variable conflicts
+INGESTION_ENABLED_VAL=$(grep -E "^INGESTION_ENABLED=" .env 2>/dev/null | cut -d '=' -f2 | tr -d '"' | tr -d "'" || echo "false")
+INGESTION_PORT=3003
+if [ "$INGESTION_ENABLED_VAL" = "true" ]; then
+    INGESTION_ENABLED=true
+    # Use custom port if specified, otherwise use 3003 (avoid conflict with hybrid-rag on 3002)
+    INGESTION_PORT_VAL=$(grep -E "^INGESTION_SERVICE_PORT=" .env 2>/dev/null | cut -d '=' -f2 | tr -d '"' | tr -d "'" || echo "")
+    if [ -n "$INGESTION_PORT_VAL" ]; then
+        INGESTION_PORT=$INGESTION_PORT_VAL
+    fi
+else
+    INGESTION_ENABLED=false
+fi
+
 echo ""
 echo -e "${BLUE}🚀 Starting services...${NC}"
 echo ""
@@ -108,10 +182,13 @@ cd "$SCRIPT_DIR" || exit 1
 
 # Start Memory Service first (dependency for Hybrid RAG)
 echo -e "${CYAN}📦 Starting Memory Service (port 3001)...${NC}"
-cd "$SCRIPT_DIR/apps/memory-service"
+cd "$SCRIPT_DIR/apps/memory-service" || {
+    echo -e "${RED}❌ Error: Cannot access apps/memory-service directory${NC}"
+    exit 1
+}
 pnpm dev > "$SCRIPT_DIR/logs/memory-service.log" 2>&1 &
 MEMORY_PID=$!
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR" || exit 1
 echo -e "${GREEN}   Started (PID: $MEMORY_PID)${NC}"
 echo -n "   "
 MEMORY_READY=false
@@ -153,10 +230,13 @@ sleep 1
 
 # Start Hybrid RAG second (dependency for Gateway)
 echo -e "${CYAN}📦 Starting Hybrid RAG (port 3002)...${NC}"
-cd "$SCRIPT_DIR/sidecar-hybrid-rag"
+cd "$SCRIPT_DIR/sidecar-hybrid-rag" || {
+    echo -e "${RED}❌ Error: Cannot access sidecar-hybrid-rag directory${NC}"
+    exit 1
+}
 pnpm dev > "$SCRIPT_DIR/logs/hybrid-rag.log" 2>&1 &
 HYBRID_RAG_PID=$!
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR" || exit 1
 echo -e "${GREEN}   Started (PID: $HYBRID_RAG_PID)${NC}"
 echo -n "   "
 HYBRID_RAG_READY=false
@@ -196,12 +276,48 @@ echo ""
 
 sleep 1
 
-# Start Gateway third
-echo -e "${CYAN}📦 Starting Gateway (port 8787)...${NC}"
-cd "$SCRIPT_DIR/apps/llm-gateway"
-pnpm dev > "$SCRIPT_DIR/logs/gateway.log" 2>&1 &
-GATEWAY_PID=$!
+# Build shared package (required for gateway imports)
+echo -e "${CYAN}🔨 Building shared package...${NC}"
+cd "$SCRIPT_DIR/packages/shared" || {
+    echo -e "${RED}❌ Error: Cannot access packages/shared directory${NC}"
+    exit 1
+}
+if ! pnpm build > "$SCRIPT_DIR/logs/shared-build.log" 2>&1; then
+    echo -e "${RED}❌ Failed to build shared package${NC}"
+    echo -e "${YELLOW}   Check logs: tail -20 logs/shared-build.log${NC}"
+    exit 1
+fi
+cd "$SCRIPT_DIR" || exit 1
+echo -e "${GREEN}✅ Shared package built${NC}"
+
+# Ensure native modules are built (better-sqlite3)
+echo -e "${CYAN}🔨 Building native modules...${NC}"
 cd "$SCRIPT_DIR"
+pnpm rebuild better-sqlite3 > "$SCRIPT_DIR/logs/native-build.log" 2>&1 || true
+
+# Fix ingestion-service better-sqlite3 if needed (copy from working memory-service)
+if [ ! -f "$SCRIPT_DIR/apps/ingestion-service/node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3/build/Release/better_sqlite3.node" ]; then
+  if [ -f "$SCRIPT_DIR/apps/memory-service/node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3/build/Release/better_sqlite3.node" ]; then
+    mkdir -p "$SCRIPT_DIR/apps/ingestion-service/node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3/build/Release"
+    cp "$SCRIPT_DIR/apps/memory-service/node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3/build/Release/better_sqlite3.node" \
+       "$SCRIPT_DIR/apps/ingestion-service/node_modules/.pnpm/better-sqlite3@11.10.0/node_modules/better-sqlite3/build/Release/" 2>/dev/null || true
+  fi
+fi
+
+echo -e "${GREEN}✅ Native modules ready${NC}"
+
+sleep 1
+
+# Start Gateway third (uses port 8787)
+echo -e "${CYAN}📦 Starting Gateway (port 8787)...${NC}"
+cd "$SCRIPT_DIR/apps/llm-gateway" || {
+    echo -e "${RED}❌ Error: Cannot access apps/llm-gateway directory${NC}"
+    exit 1
+}
+# Ensure gateway uses correct port
+GATEWAY_PORT=8787 pnpm dev > "$SCRIPT_DIR/logs/gateway.log" 2>&1 &
+GATEWAY_PID=$!
+cd "$SCRIPT_DIR" || exit 1
 echo -e "${GREEN}   Started (PID: $GATEWAY_PID)${NC}"
 echo -n "   "
 GATEWAY_READY=false
@@ -241,12 +357,55 @@ echo ""
 
 sleep 1
 
+# Start Ingestion Service (optional, if enabled)
+INGESTION_PID=""
+if [ "$INGESTION_ENABLED" = true ]; then
+    echo -e "${CYAN}📦 Starting Ingestion Service (port $INGESTION_PORT)...${NC}"
+    cd "$SCRIPT_DIR/apps/ingestion-service" || {
+        echo -e "${RED}❌ Error: Cannot access apps/ingestion-service directory${NC}"
+        exit 1
+    }
+    INGESTION_SERVICE_PORT=$INGESTION_PORT INGESTION_ENABLED=true pnpm dev > "$SCRIPT_DIR/logs/ingestion-service.log" 2>&1 &
+    INGESTION_PID=$!
+    cd "$SCRIPT_DIR" || exit 1
+    echo -e "${GREEN}   Started (PID: $INGESTION_PID)${NC}"
+    echo -n "   "
+    INGESTION_READY=false
+    for i in {1..30}; do
+        # Check if process is still running
+        if ! kill -0 $INGESTION_PID 2>/dev/null; then
+            echo -e "\n${YELLOW}⚠️  Ingestion Service process died (non-critical)${NC}"
+            INGESTION_PID=""
+            break
+        fi
+        # Check if health endpoint responds
+        if curl -s http://localhost:$INGESTION_PORT/health > /dev/null 2>&1; then
+            echo -e "${GREEN}✅ Ready${NC}"
+            INGESTION_READY=true
+            break
+        fi
+        sleep 1
+        echo -n "."
+    done
+    if [ "$INGESTION_READY" = false ] && [ -n "$INGESTION_PID" ]; then
+        echo -e "\n${YELLOW}⚠️  Ingestion Service health check timeout (non-critical, continuing...)${NC}"
+    fi
+    echo ""
+    sleep 1
+else
+    echo -e "${CYAN}📦 Ingestion Service:${NC} ${YELLOW}Skipped (disabled)${NC}"
+    echo ""
+fi
+
 # Start Web UI last
 echo -e "${CYAN}📦 Starting Web UI (port 5173)...${NC}"
-cd "$SCRIPT_DIR/apps/web"
+cd "$SCRIPT_DIR/apps/web" || {
+    echo -e "${RED}❌ Error: Cannot access apps/web directory${NC}"
+    exit 1
+}
 pnpm dev > "$SCRIPT_DIR/logs/web.log" 2>&1 &
 WEB_PID=$!
-cd "$SCRIPT_DIR"
+cd "$SCRIPT_DIR" || exit 1
 echo -e "${GREEN}   Started (PID: $WEB_PID)${NC}"
 echo -n "   "
 for i in {1..60}; do
@@ -267,6 +426,9 @@ echo -e "${BLUE}📍 Services:${NC}"
 echo -e "  ${GREEN}Gateway:${NC}       http://localhost:8787${CYAN} (PID: $GATEWAY_PID)${NC}"
 echo -e "  ${GREEN}Memory Service:${NC} http://localhost:3001${CYAN} (PID: $MEMORY_PID)${NC}"
 echo -e "  ${GREEN}Hybrid RAG:${NC}     http://localhost:3002${CYAN} (PID: $HYBRID_RAG_PID)${NC}"
+if [ -n "$INGESTION_PID" ]; then
+    echo -e "  ${GREEN}Ingestion Service:${NC} http://localhost:$INGESTION_PORT${CYAN} (PID: $INGESTION_PID)${NC}"
+fi
 echo -e "  ${GREEN}Web UI:${NC}         http://localhost:5173${CYAN} (PID: $WEB_PID)${NC}"
 echo ""
 
@@ -285,6 +447,9 @@ check_health() {
 check_health "Gateway" "http://localhost:8787/v1"
 check_health "Memory Service" "http://localhost:3001/v1/metrics"
 check_health "Hybrid RAG" "http://localhost:3002/health"
+if [ -n "$INGESTION_PID" ]; then
+    check_health "Ingestion Service" "http://localhost:$INGESTION_PORT/health"
+fi
 check_health "Web UI" "http://localhost:5173"
 
 echo ""
@@ -303,6 +468,14 @@ else
     echo -e "  ${YELLOW}⚠️  Memory DB:${NC} Will initialize on first use"
 fi
 
+if [ "$INGESTION_ENABLED" = true ]; then
+    if [ -f apps/ingestion-service/data/ingestion.db ] && [ -s apps/ingestion-service/data/ingestion.db ]; then
+        echo -e "  ${GREEN}✅ Ingestion DB:${NC} Ready"
+    else
+        echo -e "  ${YELLOW}⚠️  Ingestion DB:${NC} Will initialize on first use"
+    fi
+fi
+
 # RAG Layer Status
 echo ""
 echo -e "${BLUE}🔍 Hybrid RAG Layer Status:${NC}"
@@ -315,12 +488,47 @@ fi
 # Check for required API keys
 echo -e "  ${GREEN}✅ Web RAG:${NC} Ready (Brave API)"
 echo -e "  ${GREEN}✅ Memory RAG:${NC} Ready (SQLite)"
+if [ "$INGESTION_ENABLED" = true ]; then
+    echo -e "  ${GREEN}✅ Ingestion RAG:${NC} Ready (RSS feeds)"
+fi
+
+# LLM Configuration
+echo ""
+echo -e "${BLUE}🤖 LLM Configuration:${NC}"
+echo -e "  ${GREEN}✅ Default Model:${NC} gemini-2.5-flash (Google)"
+if [ -n "$GOOGLE_API_KEY" ]; then
+    echo -e "  ${GREEN}✅ Google API:${NC} Configured"
+else
+    echo -e "  ${RED}❌ Google API:${NC} Missing"
+fi
+if [ -n "$OPENAI_API_KEY" ]; then
+    echo -e "  ${GREEN}✅ OpenAI API:${NC} Configured (for embeddings)"
+else
+    echo -e "  ${YELLOW}⚠️  OpenAI API:${NC} Missing (embeddings disabled)"
+fi
+if [ -n "$ANTHROPIC_API_KEY" ]; then
+    echo -e "  ${GREEN}✅ Anthropic API:${NC} Configured (optional)"
+else
+    echo -e "  ${YELLOW}⚠️  Anthropic API:${NC} Not configured (optional)"
+fi
+
+# Phase 7 Infrastructure Status
+echo ""
+echo -e "${BLUE}⚙️  Phase 7 Infrastructure:${NC}"
+if [ "$REDIS_AVAILABLE" = true ]; then
+    echo -e "  ${GREEN}✅ Redis:${NC} Connected (telemetry, export queue, WebSocket enabled)"
+else
+    echo -e "  ${YELLOW}⚠️  Redis:${NC} Not available (Phase 7 features disabled)"
+fi
 
 echo ""
 echo -e "${BLUE}📊 Logs:${NC}"
 echo -e "  ${CYAN}tail -f logs/gateway.log${NC}        - Gateway logs"
 echo -e "  ${CYAN}tail -f logs/memory-service.log${NC} - Memory service logs"
 echo -e "  ${CYAN}tail -f logs/hybrid-rag.log${NC}     - Hybrid RAG logs"
+if [ -n "$INGESTION_PID" ]; then
+    echo -e "  ${CYAN}tail -f logs/ingestion-service.log${NC} - Ingestion service logs"
+fi
 echo -e "  ${CYAN}tail -f logs/web.log${NC}            - Web UI logs"
 echo ""
 
@@ -339,7 +547,12 @@ echo -e "${BLUE}═════════════════════�
 echo ""
 
 # Save PIDs to file for easy stopping
-echo "$GATEWAY_PID $MEMORY_PID $HYBRID_RAG_PID $WEB_PID" > "$SCRIPT_DIR/.hybrid-rag-pids"
+PIDS="$GATEWAY_PID $MEMORY_PID $HYBRID_RAG_PID"
+if [ -n "$INGESTION_PID" ]; then
+    PIDS="$PIDS $INGESTION_PID"
+fi
+PIDS="$PIDS $WEB_PID"
+echo "$PIDS" > "$SCRIPT_DIR/.hybrid-rag-pids"
 
 echo -e "${CYAN}Press Ctrl+C to stop all services${NC}"
 echo ""
@@ -362,6 +575,11 @@ stop_services() {
     if [ -n "$HYBRID_RAG_PID" ]; then
         kill -9 $HYBRID_RAG_PID 2>/dev/null || true
         echo -e "${GREEN}  ✅ Hybrid RAG stopped${NC}"
+    fi
+    
+    if [ -n "$INGESTION_PID" ]; then
+        kill -9 $INGESTION_PID 2>/dev/null || true
+        echo -e "${GREEN}  ✅ Ingestion Service stopped${NC}"
     fi
     
     if [ -n "$WEB_PID" ]; then
@@ -401,6 +619,11 @@ while true; do
         break
     fi
     
+    if [ -n "$INGESTION_PID" ] && ! check_port $INGESTION_PORT; then
+        echo -e "${YELLOW}⚠️  Ingestion Service stopped unexpectedly (non-critical)${NC}"
+        INGESTION_PID=""
+    fi
+    
     if ! check_port 5173; then
         echo -e "${RED}❌ Web UI stopped unexpectedly${NC}"
         break
@@ -408,4 +631,3 @@ while true; do
 done
 
 stop_services
-

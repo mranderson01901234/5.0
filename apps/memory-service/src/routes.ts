@@ -394,12 +394,13 @@ export function registerRoutes(
     const authenticatedUserId = req.user.id;
     
     try {
-      const { userId, threadId, query, maxItems = 5, deadlineMs = 200 } = req.query as {
+      const { userId, threadId, query, maxItems = 5, deadlineMs = 200, expansionMode = 'normal' } = req.query as {
         userId: string;
         threadId?: string;
         query?: string;
         maxItems?: number;
         deadlineMs?: number;
+        expansionMode?: 'strict' | 'normal' | 'aggressive';
       };
 
       if (!userId) {
@@ -446,16 +447,17 @@ export function registerRoutes(
                   keywordWeight: parseFloat(process.env.HYBRID_SEARCH_KEYWORD_WEIGHT || '0.3'),
                   deadlineMs: deadline - 50, // Leave buffer for processing
                   threadId,
+                  expansionMode: expansionMode as 'strict' | 'normal' | 'aggressive',
                 });
                 searchType = 'hybrid';
               } catch (error: any) {
                 app.log.warn({ error: error.message, userId }, 'Hybrid search failed, falling back to keyword search');
-                memories = keywordOnlySearch(db, userId, query || '', limit, threadId);
+                memories = keywordOnlySearch(db, userId, query || '', limit, threadId, expansionMode as 'strict' | 'normal' | 'aggressive');
                 searchType = 'keyword';
               }
             } else {
               // Fallback to keyword-only search
-              memories = keywordOnlySearch(db, userId, query || '', limit, threadId);
+              memories = keywordOnlySearch(db, userId, query || '', limit, threadId, expansionMode as 'strict' | 'normal' | 'aggressive');
               searchType = 'keyword';
             }
 
@@ -804,7 +806,9 @@ export function registerRoutes(
     }
 
     // Create audit record
-    const avgScore = scores.reduce((sum, s) => sum + s, 0) / scores.length;
+    const avgScore = scores.length > 0 
+      ? scores.reduce((sum, s) => sum + s, 0) / scores.length 
+      : 0;
     auditModel.create({
       userId,
       threadId,

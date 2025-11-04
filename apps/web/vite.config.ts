@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig, loadEnv } from 'vite';
 import react from '@vitejs/plugin-react';
 import tsconfigPaths from 'vite-tsconfig-paths';
@@ -9,9 +10,16 @@ export default defineConfig(({ mode }) => {
 
   const cfg: ReturnType<typeof defineConfig> = {
     plugins: [react(), tsconfigPaths()],
+    test: {
+        globals: true,
+        environment: 'jsdom',
+        setupFiles: ['./vitest.setup.ts', './src/setupTests.ts'],
+        clearMocks: true,
+    },
     resolve: {
       alias: {
         '@': path.resolve(__dirname, './src'),
+        '@clerk/nextjs/server': path.resolve(__dirname, './src/test/mocks/clerk.ts'),
       },
     },
     worker: {
@@ -68,6 +76,34 @@ export default defineConfig(({ mode }) => {
               }
             });
           },
+        },
+        '/api': {
+          target: 'http://localhost:8787',
+          changeOrigin: true,
+          secure: false,
+          ws: false,
+          configure: (proxy, _options) => {
+            proxy.on('error', (err, req, res) => {
+              // eslint-disable-next-line no-console
+              console.error('Vite proxy error (API):', err);
+              if (!res.headersSent) {
+                res.writeHead(500, { 'Content-Type': 'text/plain' });
+                res.end('Proxy error: ' + err.message);
+              }
+            });
+            proxy.on('proxyReq', (proxyReq, req, res) => {
+              // Forward Authorization header
+              if (req.headers.authorization) {
+                proxyReq.setHeader('Authorization', req.headers.authorization);
+              }
+            });
+          },
+        },
+        '/ws': {
+          target: 'ws://localhost:8787',
+          ws: true,
+          changeOrigin: true,
+          secure: false,
         },
         '/openapi.json': {
           target: 'http://localhost:8787',

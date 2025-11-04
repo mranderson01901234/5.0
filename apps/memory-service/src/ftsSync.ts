@@ -19,9 +19,9 @@ export class FTSSync {
    */
   syncMemory(id: string, content: string, userId: string, threadId: string): void {
     try {
-      // First, check if this memory already exists in FTS
+      // Check if this memory already exists in FTS
       const existing = this.db
-        .prepare('SELECT memory_id FROM memory_embeddings WHERE memory_id = ?')
+        .prepare('SELECT id FROM memories_fts WHERE id = ?')
         .get(id);
 
       if (existing) {
@@ -134,10 +134,91 @@ export class FTSSync {
   }
 
   /**
-   * Search memories using FTS
-   * Returns memory IDs matching the search query
+   * Build FTS5 query from processed query terms
+   * Converts phrases and keywords to FTS5 syntax
+   */
+  buildFTSQuery(phrases: string[], keywords: string[]): string {
+    const parts: string[] = [];
+    
+    // Add phrases (exact phrase matching with quotes)
+    for (const phrase of phrases) {
+      // Escape special FTS5 characters and wrap in quotes
+      const escaped = phrase
+        .replace(/"/g, '""')  // Escape quotes
+        .replace(/[^\w\s-]/g, ' ');  // Remove non-word chars except hyphens
+      if (escaped.trim()) {
+        parts.push(`"${escaped.trim()}"`);
+      }
+    }
+    
+    // Add keywords (word matching)
+    for (const keyword of keywords) {
+      // Escape special FTS5 characters
+      const escaped = keyword
+        .replace(/"/g, '""')  // Escape quotes
+        .replace(/[^\w-]/g, '');  // Remove non-word chars except hyphens
+      if (escaped.trim() && escaped.length >= 2) {
+        parts.push(escaped.trim());
+      }
+    }
+    
+    // Combine with OR (default) - any term can match
+    // FTS5 syntax: "phrase1" "phrase2" keyword1 keyword2
+    return parts.join(' ');
+  }
+
+  /**
+   * Search memories using FTS5 with BM25 ranking
+   * Returns memory IDs with relevance scores (lower rank = higher relevance)
    */
   search(
+    query: string,
+    userId: string,
+    limit: number = 10,
+    threadId?: string
+  ): Array<{ id: string; rank: number; score: number }> {
+    try {
+      let sqlQuery = `
+        SELECT 
+          id, 
+          bm25(memories_fts) as rank,
+          (1.0 / (bm25(memories_fts) + 1.0)) as score
+        FROM memories_fts
+        WHERE content MATCH ? AND userId = ?
+      `;
+      
+      const params: any[] = [query, userId];
+      
+      if (threadId) {
+        sqlQuery += ' AND threadId = ?';
+        params.push(threadId);
+      }
+      
+      sqlQuery += ` ORDER BY rank ASC LIMIT ?`;
+      params.push(limit);
+      
+      const results = this.db
+        .prepare(sqlQuery)
+        .all(...params) as Array<{ id: string; rank: number; score: number }>;
+
+      return results;
+    } catch (error: any) {
+      const logger = (this.db as any).logger || console;
+      if (!error.message?.includes('no such table')) {
+        logger.warn({
+          error: error.message,
+          query
+        }, 'FTS search failed');
+      }
+      return [];
+    }
+  }
+
+  /**
+   * Search memories using FTS5 (legacy method for backward compatibility)
+   * Returns memory IDs matching the search query
+   */
+  searchLegacy(
     query: string,
     userId: string,
     limit: number = 10

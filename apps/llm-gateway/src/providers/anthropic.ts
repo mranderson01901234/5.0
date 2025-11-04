@@ -1,5 +1,6 @@
 import { BaseProvider } from './base.js';
 import type { ProviderStreamResult } from '../types.js';
+import type { MessageWithAttachments } from '../types.js';
 import type { Pool } from 'undici';
 
 export class AnthropicProvider extends BaseProvider {
@@ -17,14 +18,14 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   stream(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     model: string,
     options?: { max_tokens?: number; temperature?: number }
   ): ProviderStreamResult {
     const pool = this.pool;
     return {
       async *[Symbol.asyncIterator]() {
-        // Convert messages to Anthropic format
+        // Convert messages to Anthropic format (strip attachments for now - Claude Haiku doesn't support vision)
         const systemMessage = messages.find((m) => m.role === 'system');
         const conversationMessages = messages.filter((m) => m.role !== 'system');
 
@@ -92,7 +93,7 @@ export class AnthropicProvider extends BaseProvider {
   }
 
   estimate(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     _model: string
   ): number {
     const systemPrompt = 4;

@@ -16,7 +16,9 @@
     "test:conversation": "pnpm --filter @llm-gateway/app test:conversation",
     "inspect:prompt": "pnpm --filter @llm-gateway/app inspect:prompt",
     "prepare": "husky install || true",
-    "lint-staged": "lint-staged"
+    "lint-staged": "lint-staged",
+    "audit:imagen4": "tsx scripts/audit/imagen4-audit.ts",
+    "audit:imagen4:web": "tsx scripts/audit/web-imagen4-audit.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.1.0",
@@ -25,13 +27,20 @@
     "@typescript-eslint/eslint-plugin": "^6.15.0",
     "@typescript-eslint/parser": "^6.15.0",
     "eslint": "^8.56.0",
+    "globby": "^14.0.0",
     "husky": "^9.0.11",
     "lint-staged": "^15.2.0",
     "prettier": "^3.1.1",
+    "strip-json-comments": "^5.0.1",
+    "ts-morph": "^24.0.0",
+    "tsx": "^4.19.0",
     "typescript": "^5.3.3"
   },
   "dependencies": {
-    "dotenv": "^17.2.3"
+    "@fastify/multipart": "^9.3.0",
+    "dotenv": "^17.2.3",
+    "mammoth": "^1.11.0",
+    "pdf-parse": "^2.4.5"
   },
   "lint-staged": {
     "*.{ts,tsx,js,jsx}": [

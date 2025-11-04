@@ -65,7 +65,8 @@ export class CostTracker {
     'claude-3-haiku-20240307': { input: 0.00025, output: 0.00125 },
     'claude-3-5-sonnet-20241022': { input: 0.003, output: 0.015 },
     'gpt-4o-mini': { input: 0.00015, output: 0.0006 },
-    'gemini-2.0-flash-exp': { input: 0.000075, output: 0.0003 }
+    'gemini-2.0-flash-exp': { input: 0.000075, output: 0.0003 },
+    'gemini-2.5-flash': { input: 0.0001, output: 0.0004 }
   };
 
   private userBudgets: Map<string, UserBudget> = new Map();
@@ -130,7 +131,22 @@ export class CostTracker {
    * Calculate cost based on usage
    */
   private calculateCost(usage: UsageData): CostData {
-    const rates = this.modelRates[usage.model as keyof typeof this.modelRates] || this.modelRates['gpt-4o-mini'];
+    // Try to find exact match first
+    let rates = this.modelRates[usage.model as keyof typeof this.modelRates];
+    
+    // If no exact match, try to infer from model name
+    if (!rates) {
+      if (usage.model.includes('gemini') || usage.model.includes('google')) {
+        rates = this.modelRates['gemini-2.5-flash']; // Default to gemini-2.5-flash rates
+      } else if (usage.model.includes('gpt') || usage.model.includes('openai')) {
+        rates = this.modelRates['gpt-4o-mini']; // Default to gpt-4o-mini rates
+      } else if (usage.model.includes('claude') || usage.model.includes('anthropic')) {
+        rates = this.modelRates['claude-3-haiku-20240307']; // Default to haiku rates
+      } else {
+        // Ultimate fallback
+        rates = this.modelRates['gpt-4o-mini'];
+      }
+    }
     
     const inputCost = (usage.inputTokens / 1000) * rates.input;
     const outputCost = (usage.outputTokens / 1000) * rates.output;

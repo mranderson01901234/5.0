@@ -3,7 +3,15 @@ import { notify } from '@/utils/toast';
 
 const EnvSchema = z.object({
   // Required
-  VITE_API_BASE_URL: z.string().url({ message: 'VITE_API_BASE_URL must be a valid URL' }),
+  // Allow relative URLs (like "/") for development (uses Vite proxy) or full URLs for production
+  VITE_API_BASE_URL: z.string().min(1, { message: 'VITE_API_BASE_URL is required' })
+    .refine(
+      (val) => {
+        // Allow relative paths (starting with /) or valid URLs
+        return val.startsWith('/') || z.string().url().safeParse(val).success;
+      },
+      { message: 'VITE_API_BASE_URL must be a valid URL or relative path (starting with /)' }
+    ),
   VITE_CLERK_PUBLISHABLE_KEY: z.string().min(1, { message: 'VITE_CLERK_PUBLISHABLE_KEY is required' }),
   // Optional
   VITE_ERROR_REPORT_URL: z.string().url().optional().or(z.literal('').transform(() => undefined)),

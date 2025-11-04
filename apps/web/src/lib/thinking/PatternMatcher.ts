@@ -13,6 +13,7 @@ export type QueryCategory =
   | 'debugging'
   | 'optimization'
   | 'research'
+  | 'image'
   | 'general';
 
 export interface QueryContext {
@@ -158,6 +159,20 @@ export class PatternMatcher {
         /\b(tell\s+me\s+about|information\s+on)\b/i
       ],
       weight: 0.9
+    },
+
+    image: {
+      keywords: [
+        'image', 'picture', 'photo', 'generate', 'create', 'draw',
+        'render', 'illustration', 'visual', 'graphic', 'logo',
+        'mascot', 'icon', 'artwork', 'sketch', 'diagram'
+      ],
+      patterns: [
+        /\b(generate|create|make|draw|render)\s+(a|an|the|me|an?)\s+(image|picture|photo|illustration|drawing|logo|graphic)/i,
+        /\b(show|display|give|give me)\s+(a|an|the|me)?\s+(image|picture|photo|illustration|drawing|logo|graphic)/i,
+        /\b(image|picture|photo|illustration|drawing|logo|graphic)\s+(of|for|with|showing)/i
+      ],
+      weight: 1.0
     },
 
     general: {

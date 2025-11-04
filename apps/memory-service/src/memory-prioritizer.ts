@@ -4,6 +4,7 @@
  */
 
 import type { Memory } from '@llm-gateway/shared';
+import { filterStopWords } from './stopwords.js';
 
 /**
  * Check if a memory contains update language that suggests it replaces an older one
@@ -37,10 +38,22 @@ function calculateMemorySimilarity(mem1: Memory, mem2: Memory): number {
   const content2 = mem2.content.toLowerCase();
   
   // Extract keywords (remove common words)
-  const commonWords = new Set(['the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'from', 'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'should', 'could', 'my', 'i', 'me', 'you', 'he', 'she', 'it', 'we', 'they']);
+  const words1Array = content1.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+  const words2Array = content2.toLowerCase().split(/\s+/).filter(w => w.length > 2);
   
-  const words1 = new Set(content1.split(/\s+/).filter(w => w.length > 2 && !commonWords.has(w)));
-  const words2 = new Set(content2.split(/\s+/).filter(w => w.length > 2 && !commonWords.has(w)));
+  const keywords1 = filterStopWords(words1Array, {
+    isQuestion: false,
+    preservePhrases: true,
+    preserveImportantPrepositions: true,
+  });
+  const keywords2 = filterStopWords(words2Array, {
+    isQuestion: false,
+    preservePhrases: true,
+    preserveImportantPrepositions: true,
+  });
+  
+  const words1 = new Set(keywords1);
+  const words2 = new Set(keywords2);
   
   // Jaccard similarity
   const intersection = new Set([...words1].filter(w => words2.has(w)));

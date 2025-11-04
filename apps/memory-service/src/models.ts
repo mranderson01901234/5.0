@@ -8,6 +8,7 @@ import { randomBytes } from 'crypto';
 import { FTSSync } from './ftsSync.js';
 import { generateEmbedding } from './embedding-service.js';
 import { findSimilarMemories } from './vector-search.js';
+import { filterStopWords } from './stopwords.js';
 
 /**
  * Generate unique ID
@@ -20,21 +21,19 @@ function generateId(): string {
  * Extract keywords from content (removes stop words, keeps meaningful terms)
  */
 function extractKeywords(content: string): Set<string> {
-  const commonWords = new Set([
-    'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for', 'of', 'with', 'from',
-    'is', 'are', 'was', 'were', 'be', 'been', 'being', 'have', 'has', 'had', 'do', 'does', 'did',
-    'will', 'would', 'could', 'should', 'may', 'might', 'can', 'about', 'what', 'how', 'why',
-    'when', 'where', 'who', 'which', 'this', 'that', 'these', 'those', 'i', 'you', 'he', 'she',
-    'it', 'we', 'they', 'me', 'him', 'her', 'us', 'them', 'my', 'your', 'his', 'her', 'its',
-    'our', 'their', 'my', 'me', 'my', 'mine'
-  ]);
-  
   const words = content.toLowerCase()
     .replace(/[^\w\s]/g, ' ') // Remove punctuation
     .split(/\s+/)
-    .filter(w => w.length > 2 && !commonWords.has(w));
+    .filter(w => w.length > 2);
   
-  return new Set(words);
+  // Filter stop words (statements, not questions, preserve phrases)
+  const keywords = filterStopWords(words, {
+    isQuestion: false,
+    preservePhrases: true,
+    preserveImportantPrepositions: true,
+  });
+  
+  return new Set(keywords);
 }
 
 /**

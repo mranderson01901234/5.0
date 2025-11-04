@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { ChatStreamRequestSchema, TokenEstimateRequestSchema, type MessageEvent } from '@llm-gateway/shared';
+import { ChatStreamRequestSchema, TokenEstimateRequestSchema, GatekeeperRequestSchema, GatekeeperResponseSchema, ArtifactCreateRequestSchema, ArtifactResponseSchema, ArtifactsListResponseSchema, ArtifactExportRequestSchema, ArtifactExportResponseSchema, type MessageEvent } from '@llm-gateway/shared';
 import { providerPool } from './ProviderPool.js';
 import { Router } from './Router.js';
 import { ContextTrimmer } from './ContextTrimmer.js';
@@ -18,9 +18,45 @@ import { SimpleQueryHandler } from './SimpleQueryHandler.js';
 import { EnhancedFollowUpDetector } from './EnhancedFollowUpDetector.js';
 import { MathQueryPostProcessor } from './MathQueryPostProcessor.js';
 import { analyzeQuery } from './QueryAnalyzer.js';
+import { classifyArtifactIntent } from './gatekeeper.js';
+import { getFeatureFlags } from './featureFlags.js';
+import { createStorageAdapter } from './storage/index.js';
+import { generateExport } from './exports/index.js';
+import { readFileSync, existsSync } from 'fs';
+import { join } from 'path';
+import { enqueueExportJob, getExportQueue } from './queue.js';
+import { telemetryStore, type TelemetryEvent } from './telemetry.js';
+import { getRedis, isRedisAvailable } from './redis.js';
+import { generateImage, IMAGEN_MODELS, IMAGEN_COSTS, type ImageGenOptions } from './utils/imagen.js';
+import { getCacheStats, clearCache } from './utils/imageCache.js';
+import { detectImageIntent } from './utils/imageIntentDetector.js';
+import { optimizeImagePrompt } from './utils/imagePromptOptimizer.js';
+import { canGenerateImage, acquireGenerationSlot, releaseGenerationSlot, getUserUsage } from './utils/imageConcurrency.js';
+import { validateImageRequest, sanitizePrompt } from './utils/imageValidation.js';
+import { generateImageFollowUp, isRepeatImageUser } from './utils/imageFollowUp.js';
 
 const userConcurrency = new Map<string, number>();
 const MOCK_MODE = process.env.GATEWAY_MOCK === '1';
+
+/**
+ * Extract topic keywords from recent messages for context
+ */
+function extractTopicsFromMessages(messages: Array<{ content: string }>): string[] {
+  if (messages.length === 0) return [];
+
+  const allContent = messages.map(m => m.content).join(' ');
+
+  // Simple keyword extraction (could be enhanced with NLP)
+  const keywords = allContent
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(word => word.length > 5) // Filter short words
+    .filter(word => !['please', 'create', 'generate', 'thanks', 'thank'].includes(word))
+    .slice(0, 10);
+
+  // Get unique keywords
+  return Array.from(new Set(keywords)).slice(0, 3);
+}
 
 // Rate limiting: token bucket per user
 const buckets = new Map<string, { tokens: number; ts: number }>();
@@ -39,6 +75,23 @@ function allow(userId: string) {
   return true;
 }
 
+// Rate limiting for gatekeeper: 20 requests per second per user
+const gatekeeperBuckets = new Map<string, { tokens: number; ts: number }>();
+function allowGatekeeper(userId: string) {
+  const now = Date.now();
+  const b = gatekeeperBuckets.get(userId) ?? { tokens: 20, ts: now };
+  const elapsed = (now - b.ts) / 1000;
+  b.tokens = Math.min(20, b.tokens + elapsed * 20); // Refill 20 tokens per second
+  b.ts = now;
+  if (b.tokens < 1) {
+    gatekeeperBuckets.set(userId, b);
+    return false;
+  }
+  b.tokens -= 1;
+  gatekeeperBuckets.set(userId, b);
+  return true;
+}
+
 function mockStream(): AsyncIterable<string> {
   const tokens = ['Hello', ' ', 'world', '!', ' ', 'This', ' ', 'is', ' ', 'a', ' ', 'test', '.'];
   return {
@@ -52,6 +105,142 @@ function mockStream(): AsyncIterable<string> {
 }
 
 export async function registerRoutes(app: FastifyInstance): Promise<void> {
+  /**
+   * GET /api/health
+   * Health check endpoint
+   */
+  app.get('/api/health', async (request, reply) => {
+    const redis = getRedis();
+    const redisAvailable = redis ? await redis.ping().then(() => true).catch(() => false) : false;
+    
+    return reply.code(200).send({
+      status: 'ok',
+      timestamp: Date.now(),
+      services: {
+        redis: redisAvailable ? 'connected' : 'disconnected',
+        database: 'connected', // Database is always available (local)
+      },
+    });
+  });
+
+  /**
+   * GET /api/workers/health
+   * Worker health check endpoint
+   */
+  app.get('/api/workers/health', async (request, reply) => {
+    const { getExportWorker } = await import('./workers/exportWorker.js');
+    const worker = getExportWorker();
+    const redis = getRedis();
+    const redisAvailable = redis ? await redis.ping().then(() => true).catch(() => false) : false;
+
+    return reply.code(200).send({
+      status: worker ? 'ok' : 'unavailable',
+      timestamp: Date.now(),
+      workers: {
+        export: worker ? 'running' : 'stopped',
+      },
+      redis: redisAvailable ? 'connected' : 'disconnected',
+    });
+  });
+
+  /**
+   * GET /api/cache/stats
+   * Get image cache statistics
+   */
+  app.get('/api/cache/stats', async (request, reply) => {
+    const stats = getCacheStats();
+    return reply.code(200).send({
+      memoryHits: stats.memoryHits,
+      memoryMisses: stats.memoryMisses,
+      dbHits: stats.dbHits,
+      dbMisses: stats.dbMisses,
+      hitRate: stats.hitRate,
+      totalSaved: stats.totalSaved,
+      totalRequests: stats.totalRequests,
+      globalCacheHits: stats.globalCacheHits,
+      perUserCacheHits: stats.perUserCacheHits,
+      cacheStrategy: 'hybrid',
+    });
+  });
+
+  /**
+   * DELETE /api/cache
+   * Clear image cache (admin only - should add auth in production)
+   */
+  app.delete('/api/cache', async (request, reply) => {
+    // TODO: Add authentication check here
+    clearCache();
+    return reply.code(200).send({ message: 'Cache cleared successfully' });
+  });
+
+  /**
+   * POST /api/image/analyze
+   * Analyze user input for image intent and suggest prompt optimization
+   */
+  app.post('/api/image/analyze', {
+    schema: {
+      body: {
+        type: 'object',
+        required: ['prompt'],
+        properties: {
+          prompt: { type: 'string' }
+        }
+      },
+      response: {
+        200: {
+          type: 'object',
+          properties: {
+            isImageRequest: { type: 'boolean' },
+            confidence: { type: 'number' },
+            original: { type: 'string' },
+            optimized: { type: ['string', 'null'] },
+            improvements: {
+              type: 'array',
+              items: { type: 'string' }
+            },
+            qualityScore: { type: 'number' },
+            showOptimizationButton: { type: 'boolean' },
+            aspectRatio: { type: 'string' },
+            aspectRatioReason: { type: 'string' }
+          }
+        }
+      }
+    }
+  }, async (request, reply) => {
+    const { prompt } = request.body as { prompt: string };
+
+    // Detect if this is an image request
+    const intent = detectImageIntent(prompt);
+
+    if (!intent.isImageRequest) {
+      return reply.send({
+        isImageRequest: false,
+        confidence: intent.confidence,
+        original: prompt,
+        optimized: null,
+        improvements: [],
+        qualityScore: 0,
+        showOptimizationButton: false,
+        aspectRatio: '1:1',
+        aspectRatioReason: 'Not an image request'
+      });
+    }
+
+    // Generate optimization suggestion
+    const optimization = optimizeImagePrompt(intent.extractedPrompt);
+
+    return reply.send({
+      isImageRequest: true,
+      confidence: intent.confidence,
+      original: prompt,
+      optimized: optimization.shouldSuggest ? optimization.optimized : null,
+      improvements: optimization.improvements,
+      qualityScore: optimization.qualityScore,
+      showOptimizationButton: optimization.shouldSuggest,
+      aspectRatio: intent.detectedAspectRatio || '1:1',
+      aspectRatioReason: intent.aspectRatioReason || 'Default'
+    });
+  });
   const config = loadConfig();
   const router = new Router();
   const trimmer = new ContextTrimmer();
@@ -176,6 +365,43 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
       let firstTokenTime = 0;
       let assistantContent = '';
       let webSearchPromise: Promise<string | null> | null = null;
+
+      // Gatekeeper dry-run integration (Phase 1)
+      // Check if artifact feature is enabled and call gatekeeper in dry-run mode
+      (async () => {
+        try {
+          const flags = await getFeatureFlags(userId);
+          if (flags.artifactFeatureEnabled && flags.gatekeeperEnabled) {
+            // Get last user message
+            const lastUserMessage = body.messages.filter((m: { role: string }) => m.role === 'user').pop();
+            if (lastUserMessage) {
+              const decision = await classifyArtifactIntent({
+                userText: lastUserMessage.content,
+                conversationSummary: undefined, // Could extract summary from conversation history
+                threadId,
+                userId,
+              });
+              
+              // Emit gatekeeper decision as SSE meta event (dry-run: logging already done in gatekeeper.ts)
+              // This allows frontend to see the decision without changing chat behavior
+              try {
+                reply.raw.write(`event: meta\ndata: ${JSON.stringify({
+                  event: 'gatekeeper_decision',
+                  shouldCreate: decision.shouldCreate,
+                  type: decision.type,
+                  confidence: decision.confidence,
+                  rationale: decision.rationale,
+                })}\n\n`);
+              } catch {
+                // Ignore write errors (connection may be closed)
+              }
+            }
+          }
+        } catch (error) {
+          // Don't block chat on gatekeeper errors
+          logger.debug({ error: error instanceof Error ? error.message : String(error) }, 'Gatekeeper dry-run error (non-blocking)');
+        }
+      })();
 
       try {
         // Check if web search is enabled in config
@@ -860,13 +1086,14 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
             followUpGuidance: getFollowUpGuidance(analysis) || undefined,
           };
           
-          // Handle memory listing requests - fetch and inject memories directly
+          // Handle memory listing requests - use recall endpoint for intelligent memory retrieval
           if (analysis.intent === 'memory_list' && userId) {
             try {
               const MEMORY_SERVICE_URL = process.env.MEMORY_SERVICE_URL || 'http://localhost:3001';
-              const memoryListUrl = `${MEMORY_SERVICE_URL}/v1/memories?userId=${userId}&limit=10&offset=0`;
+              // Use recall endpoint to get intelligently prioritized memories (same as automatic recall)
+              const recallUrl = `${MEMORY_SERVICE_URL}/v1/recall?userId=${encodeURIComponent(userId)}&threadId=${encodeURIComponent(threadId)}&maxItems=10&deadlineMs=500`;
               
-              const memoryResponse = await fetch(memoryListUrl, {
+              const memoryResponse = await fetch(recallUrl, {
                 method: 'GET',
                 headers: {
                   'Content-Type': 'application/json',
@@ -876,24 +1103,31 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
               }).catch(() => null);
               
               if (memoryResponse && 'ok' in memoryResponse && (memoryResponse as Response).ok) {
-                const memoryData = await (memoryResponse as Response).json().catch(() => null) as { memories?: Array<{ content: string; tier: string; priority: number; createdAt: number }> } | null;
+                const memoryData = await (memoryResponse as Response).json().catch(() => null) as { 
+                  memories?: Array<{ content: string; tier: string; priority: number; createdAt?: number }>; 
+                  count?: number;
+                  searchType?: string;
+                } | null;
                 
                 if (memoryData && Array.isArray(memoryData.memories) && memoryData.memories.length > 0) {
                   // Format memories as natural text for the LLM
                   const memoryList = memoryData.memories.slice(0, 10).map((mem, idx) => {
                     const content = mem.content.length > 150 ? mem.content.substring(0, 150) + '...' : mem.content;
-                    return `${idx + 1}. ${content}`;
+                    const tier = mem.tier || 'TIER3';
+                    return `${idx + 1}. [${tier}] ${content}`;
                   }).join('\n\n');
                   
-                  ingestedContextText = `User is asking to see their saved memories. Here are the current memories:\n\n${memoryList}`;
-                  logger.debug({ userId, memoryCount: memoryData.memories.length }, 'Memory list fetched for user');
+                  ingestedContextText = `User is asking to see their saved memories. Here are the current memories (using recall with ${memoryData.searchType || 'keyword'} search):\n\n${memoryList}`;
+                  logger.debug({ userId, memoryCount: memoryData.memories.length, searchType: memoryData.searchType }, 'Memory recall completed for list request');
                 } else {
                   ingestedContextText = 'User is asking to see their saved memories. They currently have no saved memories.';
-                  logger.debug({ userId }, 'No memories found for user');
+                  logger.debug({ userId }, 'No memories found for user via recall');
                 }
+              } else {
+                logger.warn({ userId, status: memoryResponse?.status }, 'Memory recall failed for list request (non-critical)');
               }
             } catch (error: any) {
-              logger.warn({ error: error.message }, 'Failed to fetch memory list (non-critical)');
+              logger.warn({ error: error.message }, 'Failed to fetch memory list via recall (non-critical)');
             }
           }
           
@@ -1337,6 +1571,27 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         // Remove old system messages
         let trimmed = initialTrimmed.filter(m => m.role !== 'system');
         
+        // Preserve attachments from original messages
+        // Map trimmed messages back to original messages to get attachments
+        const messageMap = new Map<string, any>();
+        body.messages.forEach((msg: any, idx: number) => {
+          const key = `${msg.role}:${idx}:${msg.content.substring(0, 50)}`;
+          messageMap.set(key, msg);
+        });
+        
+        // Merge attachments back into trimmed messages
+        trimmed = trimmed.map((msg, idx) => {
+          // Try to find matching original message by content
+          const matchingOriginal = body.messages.find((orig: any) => 
+            orig.role === msg.role && orig.content === msg.content
+          );
+          
+          if (matchingOriginal && matchingOriginal.attachments) {
+            return { ...msg, attachments: matchingOriginal.attachments };
+          }
+          return msg;
+        });
+        
         // Add new system messages at the beginning
         if (systemMessages.length > 0) {
           trimmed.unshift(...systemMessages);
@@ -1359,11 +1614,34 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
         let frContent: string | null = null;
         let frLatency = 0;
 
+        // Detect image attachments and force routing to Google/Gemini for vision support
+        const hasImageAttachments = (messages: any[]): boolean => {
+          return messages.some(msg => 
+            msg.attachments && Array.isArray(msg.attachments) &&
+            msg.attachments.some((att: any) => 
+              att.mimeType && att.mimeType.startsWith('image/') && att.url
+            )
+          );
+        };
+        
+        const containsImages = hasImageAttachments(body.messages);
+        
         // Smart model selection: if no explicit provider/model requested, use optimal routing
         let finalProvider: string | undefined = providerName;
         let finalModel: string | undefined = model;
         
-        if (!body.provider && !body.model) {
+        // Force Google/Gemini for vision if images are present
+        if (containsImages) {
+          finalProvider = 'google';
+          finalModel = config.models.google; // 'gemini-2.5-flash'
+          logger.info({ 
+            userId, 
+            threadId, 
+            selectedProvider: finalProvider, 
+            selectedModel: finalModel,
+            reason: 'Image attachments detected - using Gemini vision'
+          }, 'Vision routing: Images detected, forcing Google/Gemini');
+        } else if (!body.provider && !body.model) {
           // No explicit model/provider - use smart routing
           const optimal = router.selectOptimalModel(
             queryLastUserMessage?.content || '',
@@ -1939,6 +2217,1525 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
   });
 
   /**
+   * POST /api/artifacts/gatekeeper
+   * Gatekeeper endpoint for determining if artifact should be created
+   */
+  app.post('/api/artifacts/gatekeeper', {
+    preHandler: async (request, reply) => {
+      try {
+        // Require authentication
+        await app.requireAuth(request, reply);
+        
+        // If requireAuth sent a response, stop here
+        if (reply.sent) {
+          return;
+        }
+        
+        const userId = request.user?.id;
+        if (!userId) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+        
+        // Rate limiting (20 requests per second)
+        if (!allowGatekeeper(userId)) {
+          return reply.code(429).send({ error: 'Rate limit exceeded' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Gatekeeper auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+      
+      const userId = request.user.id;
+      
+      // Validate request body
+      const parseResult = GatekeeperRequestSchema.safeParse(request.body);
+      if (!parseResult.success) {
+        logger.error({ body: request.body, error: parseResult.error }, 'Invalid gatekeeper request body');
+        return reply.code(400).send({ error: 'Invalid request', details: parseResult.error });
+      }
+      
+      const body = parseResult.data;
+      
+      // Ensure userId in body matches authenticated user
+      if (body.userId !== userId) {
+        return reply.code(403).send({ error: 'User ID mismatch' });
+      }
+      
+      // Check feature flags
+      const flags = await getFeatureFlags(userId);
+      if (!flags.gatekeeperEnabled) {
+        // Return shouldCreate:false when feature is disabled
+        const disabledResult = GatekeeperResponseSchema.parse({
+          shouldCreate: false,
+          type: null,
+          rationale: "Feature disabled",
+          confidence: 0,
+        });
+        return reply.code(200).send(disabledResult);
+      }
+      
+      // Call gatekeeper classifier
+      const result = await classifyArtifactIntent(body);
+      
+      // Validate and return response
+      const validatedResult = GatekeeperResponseSchema.parse(result);
+      return reply.code(200).send(validatedResult);
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Gatekeeper endpoint error');
+      if (!reply.sent) {
+        return reply.code(500).send({ 
+          error: 'Internal server error', 
+          details: error?.message || String(error) 
+        });
+      }
+    }
+  });
+
+  /**
+   * POST /api/artifacts/create
+   * Create a new artifact
+   */
+  app.post('/api/artifacts/create', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Artifact create auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+      
+      const userId = request.user.id;
+      
+      // Validate request body
+      const parseResult = ArtifactCreateRequestSchema.safeParse(request.body);
+      if (!parseResult.success) {
+        logger.error({ body: request.body, error: parseResult.error }, 'Invalid artifact create request body');
+        return reply.code(400).send({ error: 'Invalid request', details: parseResult.error });
+      }
+      
+      const body = parseResult.data;
+      
+      // Check feature flags
+      const flags = await getFeatureFlags(userId);
+      if (!flags.artifactCreationEnabled) {
+        return reply.code(403).send({ error: 'Artifact creation is disabled' });
+      }
+      
+      // Generate artifact ID
+      const artifactId = randomUUID();
+      const createdAt = Math.floor(Date.now() / 1000);
+      
+      // Store artifact in database
+      const db = getDatabase();
+      db.prepare(`
+        INSERT INTO artifacts (id, user_id, thread_id, type, data, metadata, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        artifactId,
+        userId,
+        body.threadId,
+        body.type,
+        JSON.stringify(body.data),
+        body.metadata ? JSON.stringify(body.metadata) : null,
+        createdAt
+      );
+      
+      // Log telemetry event
+      const telemetryEvent = {
+        event: 'artifact_saved',
+        userId,
+        threadId: body.threadId,
+        artifactId,
+        type: body.type,
+        persisted: true,
+        timestamp: Date.now(),
+      };
+      logger.info(telemetryEvent);
+      telemetryStore.addEvent(telemetryEvent).catch(err => {
+        logger.warn({ error: err.message }, 'Failed to publish telemetry event');
+      });
+      
+      // Return created artifact
+      const artifact = ArtifactResponseSchema.parse({
+        id: artifactId,
+        threadId: body.threadId,
+        type: body.type,
+        data: body.data,
+        metadata: body.metadata,
+        createdAt: createdAt * 1000, // Convert to milliseconds
+      });
+      
+      return reply.code(201).send(artifact);
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Artifact create endpoint error');
+      if (!reply.sent) {
+        return reply.code(500).send({ 
+          error: 'Internal server error', 
+          details: error?.message || String(error) 
+        });
+      }
+    }
+  });
+
+  /**
+   * POST /api/artifacts/image
+   * Generate an image using Google Imagen 4 and create an artifact
+   */
+  app.post('/api/artifacts/image', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Image generation auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+
+      // Check feature flag
+      if (process.env.IMAGE_GEN_ENABLED !== 'true') {
+        return reply.code(403).send({ error: 'Image generation is disabled.' });
+      }
+
+      // Parse request body
+      const body = request.body as {
+        threadId: string;
+        prompt: string;
+        size?: "1024x1024" | "768x1024" | "1024x768";
+        aspectRatio?: "1:1" | "9:16" | "16:9" | "4:3" | "3:4";
+        sampleCount?: number;
+        safetyFilterLevel?: "BLOCK_NONE" | "BLOCK_ONLY_HIGH" | "BLOCK_MEDIUM_AND_HIGH";
+        personGeneration?: "ALLOW_ALL" | "ALLOW_ADULT" | "DONT_ALLOW";
+        negativePrompt?: string;
+        seed?: number;
+        model?: typeof IMAGEN_MODELS[keyof typeof IMAGEN_MODELS];
+        artifactId?: string; // For regenerate
+      };
+
+      if (!body.threadId || !body.prompt) {
+        return reply.code(400).send({ error: 'threadId and prompt are required.' });
+      }
+
+      // Validate prompt
+      const validation = validateImageRequest(body.prompt);
+      if (!validation.isValid) {
+        return reply.code(400).send({
+          error: 'Validation failed',
+          details: validation.errors
+        });
+      }
+
+      // Log warnings if any
+      if (validation.warnings.length > 0) {
+        logger.warn({ warnings: validation.warnings, userId }, 'Image generation warnings');
+      }
+
+      // Check concurrency limits
+      const concurrencyCheck = canGenerateImage(userId);
+      if (!concurrencyCheck.allowed) {
+        return reply.code(429).send({
+          error: concurrencyCheck.reason || 'Too many concurrent requests',
+          usage: getUserUsage(userId)
+        });
+      }
+
+      // Sanitize prompt
+      const sanitizedPrompt = sanitizePrompt(body.prompt);
+
+      // Build image generation options
+      // Fixed settings: model=standard, sampleCount=1
+      const imageOptions: ImageGenOptions = {
+        model: IMAGEN_MODELS.STANDARD,  // Always use standard model
+        sampleCount: 1,  // Always generate 1 image
+        aspectRatio: body.aspectRatio || '1:1',  // Use provided or default
+      };
+
+      // Optional settings (if you want to keep them)
+      if (body.safetyFilterLevel) imageOptions.safetyFilterLevel = body.safetyFilterLevel;
+      if (body.personGeneration) imageOptions.personGeneration = body.personGeneration;
+      if (body.negativePrompt) imageOptions.negativePrompt = body.negativePrompt;
+      if (body.seed !== undefined) imageOptions.seed = body.seed;
+
+      // Acquire generation slot
+      acquireGenerationSlot(userId);
+
+      let success = false;
+      try {
+        const startTime = Date.now();
+        const images = await generateImage(sanitizedPrompt, imageOptions, userId);
+        const generationTime = Date.now() - startTime;
+        success = images && images.length > 0;
+
+      if (!images || images.length === 0) {
+        return reply.code(500).send({ error: 'Failed to generate images.' });
+      }
+
+      // Calculate cost
+      const modelUsed = body.model || IMAGEN_MODELS.STANDARD;
+      const costPerImage = IMAGEN_COSTS[modelUsed as keyof typeof IMAGEN_COSTS] || 0.04;
+      const totalCost = costPerImage * images.length;
+
+      // Create artifact payload
+      const artifactPayload = {
+        threadId: body.threadId,
+        type: 'image' as const,
+        data: {
+          images,
+          prompt: body.prompt,
+          size: body.size,
+          aspectRatio: body.aspectRatio,
+          sampleCount: body.sampleCount,
+          model: modelUsed,
+          metadata: {
+            cost: totalCost,
+            costPerImage,
+            generationTimeMs: generationTime,
+            imageCount: images.length,
+            timestamp: Date.now(),
+          },
+        },
+      };
+
+      // Generate artifact ID
+      const artifactId = randomUUID();
+      const createdAt = Math.floor(Date.now() / 1000);
+      
+      // Store artifact in database
+      const db = getDatabase();
+      db.prepare(`
+        INSERT INTO artifacts (id, user_id, thread_id, type, data, metadata, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        artifactId,
+        userId,
+        body.threadId,
+        artifactPayload.type,
+        JSON.stringify(artifactPayload.data),
+        JSON.stringify(artifactPayload.data.metadata),
+        createdAt
+      );
+
+      // Log cost tracking
+      logger.info({
+        event: 'image_generation',
+        userId,
+        threadId: body.threadId,
+        artifactId,
+        cost: totalCost,
+        imageCount: images.length,
+        model: modelUsed,
+        generationTimeMs: generationTime,
+      });
+
+      // Log telemetry event
+      const telemetryEvent = {
+        event: 'artifact_saved',
+        userId,
+        threadId: body.threadId,
+        artifactId,
+        type: 'image',
+        persisted: true,
+        timestamp: Date.now(),
+      };
+      telemetryStore.addEvent(telemetryEvent).catch(err => {
+        logger.warn({ error: err.message }, 'Failed to publish telemetry event');
+      });
+
+        // Generate and store follow-up message asynchronously
+        setImmediate(async () => {
+          try {
+            // Check for recent memory context
+            const recentMessages = db.prepare(`
+              SELECT content FROM messages
+              WHERE user_id = ? AND thread_id = ?
+              ORDER BY created_at DESC
+              LIMIT 10
+            `).all(userId, body.threadId) as Array<{ content: string }>;
+
+            const hasMemories = recentMessages.length > 0;
+            const recentMemoryTopics = extractTopicsFromMessages(recentMessages);
+
+            // Check if repeat user
+            const imageCount = db.prepare(`
+              SELECT COUNT(*) as count FROM artifacts
+              WHERE user_id = ? AND type = 'image' AND deleted_at IS NULL
+            `).get(userId) as { count: number };
+
+            const isRepeat = isRepeatImageUser(userId, imageCount?.count || 0);
+
+            // Generate contextual follow-up
+            const followUp = generateImageFollowUp({
+              prompt: body.prompt,
+              userId,
+              hasMemories,
+              recentMemoryTopics,
+              isRepeatUser: isRepeat,
+            });
+
+            // Store assistant follow-up message
+            const followUpTimestamp = Math.floor(Date.now() / 1000);
+            db.prepare(`
+              INSERT INTO messages (thread_id, user_id, role, content, created_at)
+              VALUES (?, ?, 'assistant', ?, ?)
+            `).run(body.threadId, userId, followUp, followUpTimestamp);
+
+            logger.info({
+              userId,
+              threadId: body.threadId,
+              hasMemories,
+              isRepeat
+            }, 'Image follow-up message stored');
+
+            // Emit message event for memory service (if needed for memory integration)
+            // Note: Follow-up messages are intentionally lightweight and may not need full memory processing
+            // Uncomment if you want these to be stored in memory service:
+            // emitMessageEvent({ ... });
+          } catch (error) {
+            logger.error({ error }, 'Failed to generate image follow-up');
+          }
+        });
+
+        return reply.code(200).send({
+          artifactId,
+          cost: totalCost,
+          imageCount: images.length,
+          model: modelUsed,
+        });
+      } catch (innerError: any) {
+        logger.error({ error: innerError?.message, stack: innerError?.stack }, 'Image generation error');
+        success = false;
+        throw innerError;
+      } finally {
+        // Always release the generation slot
+        releaseGenerationSlot(userId, success);
+      }
+
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Image generation endpoint error');
+
+      // Provide user-friendly error messages
+      let errorMessage = error.message || 'Internal server error';
+      let statusCode = 500;
+
+      if (errorMessage.includes('quota exceeded')) {
+        statusCode = 429;
+      } else if (errorMessage.includes('content policy')) {
+        statusCode = 400;
+      } else if (errorMessage.includes('unavailable')) {
+        statusCode = 503;
+      }
+
+      if (!reply.sent) {
+        return reply.code(statusCode).send({ error: errorMessage });
+      }
+    }
+  });
+
+  /**
+   * GET /api/artifacts/:threadId
+   * Get all artifacts for a thread
+   */
+  app.get('/api/artifacts/:threadId', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Artifact list auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+      
+      const userId = request.user.id;
+      const threadId = (request.params as { threadId: string }).threadId;
+      
+      if (!threadId) {
+        return reply.code(400).send({ error: 'Thread ID is required' });
+      }
+      
+      // Fetch artifacts from database
+      const db = getDatabase();
+      const artifacts = db.prepare(`
+        SELECT id, thread_id, type, data, metadata, created_at
+        FROM artifacts
+        WHERE user_id = ? AND thread_id = ? AND (deleted_at IS NULL OR deleted_at = 0)
+        ORDER BY created_at DESC
+      `).all(userId, threadId) as Array<{
+        id: string;
+        thread_id: string;
+        type: string;
+        data: string;
+        metadata: string | null;
+        created_at: number;
+      }>;
+      
+      // Parse and validate artifacts
+      const parsedArtifacts = artifacts.map(art => {
+        const artifact = ArtifactResponseSchema.parse({
+          id: art.id,
+          threadId: art.thread_id,
+          type: art.type,
+          data: JSON.parse(art.data),
+          metadata: art.metadata ? JSON.parse(art.metadata) : undefined,
+          createdAt: art.created_at * 1000, // Convert to milliseconds
+        });
+        return artifact;
+      });
+      
+      const response = ArtifactsListResponseSchema.parse({
+        artifacts: parsedArtifacts,
+      });
+      
+      return reply.code(200).send(response);
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Artifact list endpoint error');
+      if (!reply.sent) {
+        return reply.code(500).send({ 
+          error: 'Internal server error', 
+          details: error?.message || String(error) 
+        });
+      }
+    }
+  });
+
+  /**
+   * DELETE /api/artifacts/:artifactId
+   * Delete an artifact (soft delete)
+   */
+  app.delete('/api/artifacts/:artifactId', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Artifact delete auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+      const artifactId = (request.params as { artifactId: string }).artifactId;
+
+      if (!artifactId) {
+        return reply.code(400).send({ error: 'Artifact ID is required' });
+      }
+
+      const db = getDatabase();
+
+      // Verify artifact exists and belongs to user
+      const artifact = db.prepare(`
+        SELECT id, user_id, thread_id
+        FROM artifacts
+        WHERE id = ? AND user_id = ? AND (deleted_at IS NULL OR deleted_at = 0)
+      `).get(artifactId, userId) as {
+        id: string;
+        user_id: string;
+        thread_id: string;
+      } | undefined;
+
+      if (!artifact) {
+        return reply.code(404).send({ error: 'Artifact not found' });
+      }
+
+      // Soft delete the artifact
+      const now = Date.now();
+      db.prepare(`
+        UPDATE artifacts
+        SET deleted_at = ?
+        WHERE id = ? AND user_id = ?
+      `).run(now, artifactId, userId);
+
+      logger.info({ userId, artifactId, threadId: artifact.thread_id }, 'Artifact deleted');
+
+      return reply.code(200).send({ success: true });
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Artifact delete endpoint error');
+      if (!reply.sent) {
+        return reply.code(500).send({ 
+          error: 'Internal server error', 
+          details: error?.message || String(error) 
+        });
+      }
+    }
+  });
+
+  /**
+   * POST /api/artifacts/export
+   * Export an artifact to PDF/DOCX/XLSX
+   */
+  app.post('/api/artifacts/export', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Artifact export auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+
+      // Validate request body
+      let body: { artifactId: string; format: 'pdf' | 'docx' | 'xlsx' };
+      try {
+        const parseResult = ArtifactExportRequestSchema.safeParse(request.body);
+        if (!parseResult.success) {
+          logger.error({ body: request.body, error: parseResult.error }, 'Invalid artifact export request body');
+          return reply.code(400).send({ error: 'Invalid request', details: parseResult.error });
+        }
+        body = parseResult.data;
+      } catch (parseError: any) {
+        logger.error({ error: parseError.message, body: request.body }, 'Failed to parse request body');
+        return reply.code(400).send({ error: 'Invalid request body', details: parseError.message });
+      }
+
+      // Fetch artifact from database to verify it exists and get threadId
+      const db = getDatabase();
+      let artifact: {
+        id: string;
+        user_id: string;
+        thread_id: string;
+        type: string;
+        data: string;
+      } | undefined;
+      
+      try {
+        artifact = db.prepare(`
+          SELECT id, user_id, thread_id, type, data
+          FROM artifacts
+          WHERE id = ? AND user_id = ? AND (deleted_at IS NULL OR deleted_at = 0)
+        `).get(body.artifactId, userId) as {
+          id: string;
+          user_id: string;
+          thread_id: string;
+          type: string;
+          data: string;
+        } | undefined;
+      } catch (dbError: any) {
+        logger.error({ 
+          error: dbError.message, 
+          artifactId: body.artifactId, 
+          userId 
+        }, 'Failed to query artifact from database');
+        return reply.code(500).send({ 
+          error: 'Database error', 
+          details: 'Failed to fetch artifact' 
+        });
+      }
+
+      if (!artifact) {
+        return reply.code(404).send({ error: 'Artifact not found' });
+      }
+
+      // Support table, sheet, and doc artifacts for export
+      if (artifact.type !== 'table' && artifact.type !== 'sheet' && artifact.type !== 'doc') {
+        return reply.code(400).send({ error: `Export not supported for artifact type: ${artifact.type}` });
+      }
+
+      // Create export record with 'queued' status
+      const exportId = randomUUID();
+      const createdAt = Math.floor(Date.now() / 1000);
+      
+      // Insert export record with placeholder URL (will be updated by worker)
+      try {
+        db.prepare(`
+          INSERT INTO exports (id, artifact_id, user_id, format, url, status, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          exportId,
+          body.artifactId,
+          userId,
+          body.format,
+          '', // Placeholder URL, will be updated by worker
+          'queued',
+          createdAt
+        );
+      } catch (insertError: any) {
+        logger.error({ 
+          error: insertError.message, 
+          exportId, 
+          artifactId: body.artifactId, 
+          userId,
+          format: body.format 
+        }, 'Failed to insert export record');
+        return reply.code(500).send({ 
+          error: 'Database error', 
+          details: 'Failed to create export record' 
+        });
+      }
+
+      // Check if export queue is available before enqueuing
+      const exportQueue = getExportQueue();
+      if (!exportQueue) {
+        logger.warn({ userId, artifactId: body.artifactId, format: body.format }, 'Export queue not available - Redis may be down');
+        // Mark export as failed
+        db.prepare(`
+          UPDATE exports
+          SET status = 'failed'
+          WHERE id = ?
+        `).run(exportId);
+        
+        return reply.code(503).send({ 
+          error: 'Export queue unavailable', 
+          details: 'Export service requires Redis. Please ensure Redis is running and configured.' 
+        });
+      }
+
+      // Enqueue export job
+      try {
+        await enqueueExportJob({
+          exportId,
+          artifactId: body.artifactId,
+          userId,
+          threadId: artifact.thread_id,
+          format: body.format,
+        });
+
+        // Log telemetry event
+        try {
+          const telemetryEvent = {
+            event: 'export_started',
+            userId,
+            threadId: artifact.thread_id,
+            artifactId: body.artifactId,
+            exportJobId: exportId,
+            format: body.format,
+            artifactType: artifact.type,
+            artifactSize: artifact.data.length,
+            timestamp: Date.now(),
+          };
+          logger.info(telemetryEvent);
+          // Fire and forget - don't await telemetry
+          telemetryStore.addEvent(telemetryEvent).catch(err => {
+            logger.warn({ error: err.message }, 'Failed to log telemetry event');
+          });
+        } catch (telemetryError: any) {
+          // Don't fail export if telemetry fails
+          logger.warn({ error: telemetryError.message }, 'Failed to log telemetry event');
+        }
+      } catch (error: any) {
+        // If queue is unavailable, mark as failed
+        try {
+          db.prepare(`
+            UPDATE exports
+            SET status = 'failed'
+            WHERE id = ?
+          `).run(exportId);
+        } catch (updateError: any) {
+          logger.error({ error: updateError.message, exportId }, 'Failed to update export status');
+        }
+
+        logger.error({ 
+          error: error.message, 
+          stack: error.stack,
+          exportId,
+          artifactId: body.artifactId,
+          format: body.format,
+          userId,
+          queueAvailable: !!getExportQueue()
+        }, 'Failed to enqueue export job');
+        return reply.code(503).send({ 
+          error: 'Export queue unavailable', 
+          details: error.message || 'Export service is temporarily unavailable. Please try again later.' 
+        });
+      }
+
+      // Return export response with queued status
+      try {
+        const exportResponse = ArtifactExportResponseSchema.parse({
+          id: exportId,
+          artifactId: body.artifactId,
+          format: body.format,
+          url: '', // Will be populated when job completes
+          status: 'queued',
+          createdAt: createdAt * 1000, // Convert to milliseconds
+        });
+
+        return reply.code(202).send(exportResponse); // 202 Accepted for async processing
+      } catch (parseError: any) {
+        logger.error({ 
+          error: parseError.message, 
+          stack: parseError.stack,
+          exportId,
+          artifactId: body.artifactId,
+          format: body.format 
+        }, 'Failed to parse export response');
+        // Still return 202 with basic response
+        return reply.code(202).send({
+          id: exportId,
+          artifactId: body.artifactId,
+          format: body.format,
+          url: '',
+          status: 'queued',
+          createdAt: createdAt * 1000,
+        });
+      }
+    } catch (error: any) {
+      logger.error({ 
+        error: error?.message, 
+        stack: error?.stack,
+        body: request.body,
+        userId: request.user?.id,
+        artifactId: (request.body as any)?.artifactId,
+        format: (request.body as any)?.format,
+        errorName: error?.name,
+        errorCode: error?.code
+      }, 'Artifact export endpoint error');
+      if (!reply.sent) {
+        const isDev = process.env.NODE_ENV === 'development' || process.env.GATEWAY_MOCK === '1';
+        return reply.code(500).send({
+          error: 'Internal server error',
+          details: error?.message || String(error),
+          ...(isDev && {
+            stack: error?.stack,
+            errorName: error?.name,
+            errorCode: error?.code
+          })
+        });
+      }
+    }
+  });
+
+  /**
+   * GET /api/exports/status/:id
+   * Get export job status
+   */
+  app.get('/api/exports/status/:id', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Export status auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+      const exportId = (request.params as { id: string }).id;
+
+      if (!exportId) {
+        return reply.code(400).send({ error: 'Export ID is required' });
+      }
+
+      // Fetch export from database
+      const db = getDatabase();
+      const exportRecord = db.prepare(`
+        SELECT id, artifact_id, user_id, format, url, status, created_at
+        FROM exports
+        WHERE id = ? AND user_id = ?
+      `).get(exportId, userId) as {
+        id: string;
+        artifact_id: string;
+        user_id: string;
+        format: string;
+        url: string;
+        status: string;
+        created_at: number;
+      } | undefined;
+
+      if (!exportRecord) {
+        return reply.code(404).send({ error: 'Export not found' });
+      }
+
+      // Return export status
+      const exportResponse = ArtifactExportResponseSchema.parse({
+        id: exportRecord.id,
+        artifactId: exportRecord.artifact_id,
+        format: exportRecord.format as 'pdf' | 'docx' | 'xlsx',
+        url: exportRecord.url,
+        status: exportRecord.status as 'queued' | 'processing' | 'completed' | 'failed',
+        createdAt: exportRecord.created_at * 1000, // Convert to milliseconds
+      });
+
+      return reply.code(200).send(exportResponse);
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Export status endpoint error');
+      if (!reply.sent) {
+        return reply.code(500).send({
+          error: 'Internal server error',
+          details: error?.message || String(error),
+        });
+      }
+    }
+  });
+
+  /**
+   * GET /api/telemetry/stream
+   * Stream telemetry events via Server-Sent Events
+   */
+  app.get('/api/telemetry/stream', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Telemetry stream auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      // Set SSE headers
+      reply.raw.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no', // Disable nginx buffering
+      });
+
+      // Send initial connection event
+      reply.raw.write(`event: connected\ndata: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+
+      // Send recent events (last 50)
+      const recentEvents = await telemetryStore.getRecentEvents(50);
+      recentEvents.forEach(event => {
+        reply.raw.write(`event: telemetry\ndata: ${JSON.stringify(event)}\n\n`);
+      });
+
+      // Subscribe to new events
+      const unsubscribe = telemetryStore.subscribe((event) => {
+        try {
+          reply.raw.write(`event: telemetry\ndata: ${JSON.stringify(event)}\n\n`);
+        } catch (error) {
+          // Client disconnected, stop sending
+          unsubscribe();
+        }
+      });
+
+      // Handle client disconnect
+      request.raw.on('close', () => {
+        unsubscribe();
+        reply.raw.end();
+      });
+
+      // Keep connection alive with heartbeat
+      const heartbeatInterval = setInterval(() => {
+        try {
+          reply.raw.write(`event: heartbeat\ndata: ${JSON.stringify({ timestamp: Date.now() })}\n\n`);
+        } catch (error) {
+          clearInterval(heartbeatInterval);
+          unsubscribe();
+        }
+      }, 30000); // Every 30 seconds
+
+      // Cleanup on disconnect
+      request.raw.on('close', () => {
+        clearInterval(heartbeatInterval);
+      });
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Telemetry stream endpoint error');
+      if (!reply.sent) {
+        return reply.code(500).send({
+          error: 'Internal server error',
+          details: error?.message || String(error),
+        });
+      }
+    }
+  });
+
+  /**
+   * GET /api/telemetry/history
+   * Query last N telemetry events from Redis
+   */
+  app.get('/api/telemetry/history', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Telemetry history auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      // Parse query parameters
+      const limit = parseInt((request.query as { limit?: string }).limit || '100', 10);
+      const eventType = (request.query as { eventType?: string }).eventType;
+      const since = (request.query as { since?: string }).since 
+        ? parseInt((request.query as { since?: string }).since!, 10)
+        : undefined;
+
+      // Validate limit
+      const validLimit = Math.min(Math.max(1, limit), 1000); // Between 1 and 1000
+
+      let events: TelemetryEvent[];
+      if (eventType) {
+        events = await telemetryStore.getEventsByType(eventType, validLimit);
+      } else if (since) {
+        events = await telemetryStore.getEventsSince(since);
+      } else {
+        events = await telemetryStore.getRecentEvents(validLimit);
+      }
+
+      return reply.code(200).send({
+        events,
+        count: events.length,
+        limit: validLimit,
+      });
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'Telemetry history endpoint error');
+      if (!reply.sent) {
+        return reply.code(500).send({
+          error: 'Internal server error',
+          details: error?.message || String(error),
+        });
+      }
+    }
+  });
+
+  /**
+   * GET /api/exports/:path
+   * Serve exported files (for local storage adapter)
+   */
+  app.get('/api/exports/*', async (request, reply) => {
+    try {
+      const path = (request.params as { '*': string })['*'];
+      if (!path) {
+        return reply.code(400).send({ error: 'Invalid export path' });
+      }
+
+      const storage = createStorageAdapter();
+      const basePath = process.env.EXPORT_STORAGE_PATH || './data/exports';
+      const basePathResolved = join(process.cwd(), basePath);
+      const fullPath = join(basePathResolved, path);
+
+      // Security: ensure path is within base directory (prevent directory traversal)
+      const normalizedPath = join(basePathResolved, path);
+      if (!normalizedPath.startsWith(basePathResolved)) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      if (!existsSync(fullPath)) {
+        return reply.code(404).send({ error: 'Export not found' });
+      }
+
+      const fileBuffer = readFileSync(fullPath);
+      const ext = path.split('.').pop()?.toLowerCase();
+      
+      const contentTypes: Record<string, string> = {
+        pdf: 'application/pdf',
+        docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      };
+
+      reply.type(contentTypes[ext || ''] || 'application/octet-stream');
+      return reply.send(fileBuffer);
+    } catch (error: any) {
+      logger.error({ error: error?.message }, 'Failed to serve export');
+      return reply.code(500).send({ error: 'Failed to serve export' });
+    }
+  });
+
+  /**
+   * POST /api/uploads
+   * Upload a file
+   */
+  app.post('/api/uploads', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Upload auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+      
+      // Parse multipart form data using Fastify multipart
+      const data = await (request as any).file();
+      
+      if (!data) {
+        return reply.code(400).send({ error: 'No file provided' });
+      }
+
+      // Check for threadId in query parameter
+      let threadId: string | null = null;
+      const threadIdParam = (request.query as any)?.threadId;
+      if (threadIdParam && typeof threadIdParam === 'string') {
+        threadId = threadIdParam;
+      }
+
+      const fileData = data;
+
+      // Validate file size (check against env limit)
+      const maxSize = parseInt(process.env.MAX_UPLOAD_SIZE || '10485760'); // 10MB default
+      const fileBuffer = await fileData.toBuffer();
+      if (fileBuffer.length > maxSize) {
+        return reply.code(400).send({ error: `File size exceeds limit of ${maxSize / 1024 / 1024}MB` });
+      }
+
+      // Validate MIME type
+      const allowedMimeTypes = (process.env.ALLOWED_MIME_TYPES || 'image/jpeg,image/png,image/gif,image/webp,application/pdf,text/plain,application/vnd.openxmlformats-officedocument.wordprocessingml.document').split(',');
+      if (!allowedMimeTypes.includes(fileData.mimetype)) {
+        return reply.code(400).send({ error: `File type ${fileData.mimetype} not allowed` });
+      }
+
+      // Generate unique file ID
+      const uploadId = randomUUID();
+
+      // Sanitize filename
+      const sanitizedFilename = fileData.filename.replace(/[^a-zA-Z0-9._-]/g, '_');
+      const ext = sanitizedFilename.split('.').pop() || '';
+      const storagePath = `uploads/${userId}/${uploadId}.${ext}`;
+
+      // Upload to storage
+      const storage = createStorageAdapter();
+      await storage.upload(fileBuffer, storagePath);
+      const urlResult = storage.getUrl(storagePath);
+      const storageUrl = typeof urlResult === 'string' ? urlResult : await urlResult;
+
+      // Store metadata in database
+      const createdAt = Math.floor(Date.now() / 1000);
+      db.prepare(`
+        INSERT INTO uploads (id, user_id, thread_id, filename, mime_type, size, storage_path, storage_url, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        uploadId,
+        userId,
+        threadId,
+        sanitizedFilename,
+        fileData.mimetype,
+        fileBuffer.length,
+        storagePath,
+        storageUrl,
+        createdAt
+      );
+
+      logger.info({
+        uploadId,
+        userId,
+        threadId,
+        filename: sanitizedFilename,
+        mimeType: fileData.mimetype,
+        size: fileBuffer.length,
+      }, 'File uploaded successfully');
+
+      return reply.code(201).send({
+        id: uploadId,
+        filename: sanitizedFilename,
+        mimeType: fileData.mimetype,
+        size: fileBuffer.length,
+        url: storageUrl,
+        createdAt: createdAt * 1000, // Convert to milliseconds
+      });
+    } catch (error: any) {
+      logger.error({ error: error?.message, stack: error?.stack }, 'File upload error');
+      if (!reply.sent) {
+        return reply.code(500).send({ error: 'Failed to upload file', details: error.message });
+      }
+    }
+  });
+
+  /**
+   * GET /api/uploads/:id
+   * Serve uploaded file
+   */
+  app.get('/api/uploads/:id', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Upload get auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+      const { id } = request.params as { id: string };
+
+      // Get upload metadata from database
+      const upload = db.prepare(`
+        SELECT id, user_id, filename, mime_type, size, storage_path, storage_url
+        FROM uploads
+        WHERE id = ? AND (deleted_at IS NULL OR deleted_at = 0)
+      `).get(id) as {
+        id: string;
+        user_id: string;
+        filename: string;
+        mime_type: string;
+        size: number;
+        storage_path: string;
+        storage_url: string;
+      } | undefined;
+
+      if (!upload) {
+        return reply.code(404).send({ error: 'Upload not found' });
+      }
+
+      // Check access control (only owner can access)
+      if (upload.user_id !== userId) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      // For local storage, read file from filesystem
+      if (process.env.STORAGE_BACKEND === 'local' || !process.env.STORAGE_BACKEND) {
+        const basePath = process.env.UPLOAD_STORAGE_PATH || './data/uploads';
+        const basePathResolved = join(process.cwd(), basePath);
+        const fullPath = join(basePathResolved, upload.storage_path.replace('uploads/', ''));
+
+        // Security: ensure path is within base directory
+        const normalizedPath = join(basePathResolved, upload.storage_path.replace('uploads/', ''));
+        if (!normalizedPath.startsWith(basePathResolved)) {
+          return reply.code(403).send({ error: 'Forbidden' });
+        }
+
+        if (!existsSync(fullPath)) {
+          return reply.code(404).send({ error: 'File not found' });
+        }
+
+        const fileBuffer = readFileSync(fullPath);
+        reply.type(upload.mime_type);
+        reply.header('Content-Disposition', `inline; filename="${upload.filename}"`);
+        return reply.send(fileBuffer);
+      } else {
+        // For S3, redirect to presigned URL
+        return reply.redirect(upload.storage_url);
+      }
+    } catch (error: any) {
+      logger.error({ error: error?.message }, 'Failed to serve upload');
+      return reply.code(500).send({ error: 'Failed to serve upload' });
+    }
+  });
+
+  /**
+   * POST /api/uploads/:id/extract
+   * Extract text content from uploaded file (PDF, DOCX, TXT)
+   */
+  app.post('/api/uploads/:id/extract', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Extract auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+      const { id } = request.params as { id: string };
+
+      // Get upload metadata from database
+      const upload = db.prepare(`
+        SELECT id, user_id, filename, mime_type, size, storage_path
+        FROM uploads
+        WHERE id = ? AND (deleted_at IS NULL OR deleted_at = 0)
+      `).get(id) as {
+        id: string;
+        user_id: string;
+        filename: string;
+        mime_type: string;
+        size: number;
+        storage_path: string;
+      } | undefined;
+
+      if (!upload) {
+        return reply.code(404).send({ error: 'Upload not found' });
+      }
+
+      // Check access control
+      if (upload.user_id !== userId) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      // Check if file type supports extraction
+      if (!canExtractText(upload.mime_type)) {
+        return reply.code(400).send({ 
+          error: 'File type not supported for text extraction',
+          mimeType: upload.mime_type,
+        });
+      }
+
+      // Read file buffer
+      let fileBuffer: Buffer;
+      if (process.env.STORAGE_BACKEND === 'local' || !process.env.STORAGE_BACKEND) {
+        const basePath = process.env.UPLOAD_STORAGE_PATH || './data/uploads';
+        const basePathResolved = join(process.cwd(), basePath);
+        const fullPath = join(basePathResolved, upload.storage_path.replace('uploads/', ''));
+
+        if (!existsSync(fullPath)) {
+          return reply.code(404).send({ error: 'File not found' });
+        }
+
+        fileBuffer = readFileSync(fullPath);
+      } else {
+        // For S3, we'd need to download the file first
+        // For now, return error for S3
+        return reply.code(501).send({ error: 'S3 extraction not yet implemented' });
+      }
+
+      // Extract text
+      const extracted = await extractTextFromFile(fileBuffer, upload.mime_type);
+
+      return reply.send({
+        uploadId: upload.id,
+        filename: upload.filename,
+        mimeType: upload.mime_type,
+        extractedText: extracted.text,
+        metadata: extracted.metadata,
+      });
+    } catch (error: any) {
+      logger.error({ error: error?.message }, 'Failed to extract text from file');
+      return reply.code(500).send({ error: 'Failed to extract text', details: error.message });
+    }
+  });
+
+  /**
+   * DELETE /api/uploads/:id
+   * Delete an uploaded file
+   */
+  app.delete('/api/uploads/:id', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Delete auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      if (!request.user?.id) {
+        return reply.code(401).send({ error: 'Authentication required' });
+      }
+
+      const userId = request.user.id;
+      const { id } = request.params as { id: string };
+
+      // Get upload metadata
+      const upload = db.prepare(`
+        SELECT id, user_id, storage_path
+        FROM uploads
+        WHERE id = ? AND (deleted_at IS NULL OR deleted_at = 0)
+      `).get(id) as {
+        id: string;
+        user_id: string;
+        storage_path: string;
+      } | undefined;
+
+      if (!upload) {
+        return reply.code(404).send({ error: 'Upload not found' });
+      }
+
+      // Check access control
+      if (upload.user_id !== userId) {
+        return reply.code(403).send({ error: 'Forbidden' });
+      }
+
+      // Soft delete: mark as deleted
+      const deletedAt = Math.floor(Date.now() / 1000);
+      db.prepare(`
+        UPDATE uploads
+        SET deleted_at = ?
+        WHERE id = ?
+      `).run(deletedAt, id);
+
+      // Optionally delete physical file (for Phase 3, we'll do soft delete only)
+      // Physical deletion can be handled by cleanup job
+
+      logger.info({ uploadId: id, userId }, 'File deleted');
+
+      return reply.code(204).send();
+    } catch (error: any) {
+      logger.error({ error: error?.message }, 'Failed to delete upload');
+      return reply.code(500).send({ error: 'Failed to delete upload', details: error.message });
+    }
+  });
+
+  /**
+   * POST /api/uploads/cleanup
+   * Run file cleanup job (can be called by cron or admin)
+   */
+  app.post('/api/uploads/cleanup', {
+    preHandler: async (request, reply) => {
+      try {
+        await app.requireAuth(request, reply);
+        if (reply.sent) {
+          return;
+        }
+        if (!request.user?.id) {
+          return reply.code(401).send({ error: 'Authentication required' });
+        }
+      } catch (error: any) {
+        logger.error({ error }, 'Cleanup auth preHandler error');
+        if (!reply.sent) {
+          return reply.code(500).send({ error: 'Internal server error', details: error.message });
+        }
+      }
+    },
+  }, async (request, reply) => {
+    try {
+      // Run cleanup job
+      const result = await runCleanupJob();
+
+      return reply.send({
+        success: true,
+        deleted: result.deleted,
+        errors: result.errors,
+      });
+    } catch (error: any) {
+      logger.error({ error: error?.message }, 'Cleanup job failed');
+      return reply.code(500).send({ error: 'Cleanup job failed', details: error.message });
+    }
+  });
+
+  /**
    * GET /v1/conversations
    * List all conversations for the authenticated user
    */
@@ -2039,11 +3836,41 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
    * Delete a conversation (soft delete)
    */
   app.delete('/v1/conversations/:threadId', {
+    schema: {
+      params: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+        },
+        required: ['threadId'],
+      },
+    },
     preHandler: async (request, reply) => {
+      // Skip auth for OPTIONS preflight requests (CORS handles these)
+      if (request.method === 'OPTIONS') {
+        return reply.code(204).send();
+      }
+      // Don't call requireAuth if reply is already sent (e.g., by CORS)
+      if (reply.sent) {
+        return;
+      }
       await app.requireAuth(request, reply);
+      // If requireAuth sent a response, don't continue
+      if (reply.sent) {
+        return;
+      }
     },
   }, async (request, reply) => {
+    // Log request details for debugging
+    logger.debug({ 
+      method: request.method, 
+      url: request.url, 
+      params: request.params,
+      headers: { authorization: request.headers.authorization ? 'present' : 'missing' }
+    }, 'Delete conversation request');
+
     if (!request.user?.id) {
+      logger.warn({ url: request.url }, 'Delete conversation: Authentication required');
       return reply.code(401).send({ error: 'Authentication required' });
     }
 
@@ -2051,6 +3878,13 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const { threadId } = request.params as { threadId: string };
+      
+      // Validate threadId format
+      if (!threadId || typeof threadId !== 'string' || threadId.trim().length === 0) {
+        logger.warn({ threadId, params: request.params }, 'Delete conversation: Invalid threadId');
+        return reply.code(400).send({ error: 'Invalid thread ID' });
+      }
+      
       const now = Math.floor(Date.now() / 1000);
 
       // First, verify that the thread exists and belongs to the user

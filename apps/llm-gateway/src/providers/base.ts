@@ -1,5 +1,5 @@
 import type { Pool } from 'undici';
-import type { IProvider, ProviderStreamResult } from '../types.js';
+import type { IProvider, ProviderStreamResult, MessageWithAttachments } from '../types.js';
 
 export abstract class BaseProvider implements IProvider {
   protected pool: Pool;
@@ -10,12 +10,12 @@ export abstract class BaseProvider implements IProvider {
 
   abstract prepare(): Promise<void>;
   abstract stream(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     model: string,
     options?: { max_tokens?: number; temperature?: number }
   ): ProviderStreamResult;
   abstract estimate(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     model: string
   ): number;
 

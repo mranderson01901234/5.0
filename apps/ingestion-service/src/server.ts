@@ -11,17 +11,27 @@
 import { pino } from 'pino';
 import { mkdirSync } from 'fs';
 import { dirname } from 'path';
+import { createRequire } from 'module';
 import { createIngestionDatabase } from './db.js';
 import { loadIngestionConfig, initializeSources } from './config.js';
 import { IngestionScheduler } from './scheduler.js';
 import { EmbeddingProcessor } from './embeddings/processor.js';
 
+const require = createRequire(import.meta.url);
+let pinoPrettyPath: string | undefined;
+try {
+  pinoPrettyPath = require.resolve('pino-pretty');
+} catch (error) {
+  // pino-pretty not available, will use default JSON output
+  pinoPrettyPath = undefined;
+}
+
 const PORT = parseInt(process.env.INGESTION_SERVICE_PORT || '3002', 10);
 const logger = pino({
   name: 'ingestion-service',
   level: process.env.LOG_LEVEL || 'info',
-  transport: process.env.NODE_ENV !== 'production' ? {
-    target: 'pino-pretty',
+  transport: process.env.NODE_ENV !== 'production' && pinoPrettyPath ? {
+    target: pinoPrettyPath,
     options: {
       colorize: true,
       ignore: 'pid,hostname',

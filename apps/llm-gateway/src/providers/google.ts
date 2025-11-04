@@ -1,6 +1,43 @@
 import { BaseProvider } from './base.js';
 import type { ProviderStreamResult } from '../types.js';
 import type { Pool } from 'undici';
+import { logger } from '../log.js';
+
+interface MessageWithAttachments {
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+    url?: string;
+  }>;
+}
+
+/**
+ * Fetch an image from a URL and convert it to base64
+ */
+async function fetchImageAsBase64(url: string): Promise<{ data: string; mimeType: string }> {
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
+    }
+    
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    const base64 = buffer.toString('base64');
+    
+    // Get content type from response headers or default to image/jpeg
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    
+    return { data: base64, mimeType: contentType };
+  } catch (error) {
+    logger.error({ error, url }, 'Failed to fetch image for vision');
+    throw error;
+  }
+}
 
 export class GoogleProvider extends BaseProvider {
   async prepare(): Promise<void> {
@@ -16,31 +53,101 @@ export class GoogleProvider extends BaseProvider {
     }
   }
 
-  stream(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+  async stream(
+    messages: Array<MessageWithAttachments>,
     model: string,
     options?: { max_tokens?: number; temperature?: number }
-  ): ProviderStreamResult {
+  ): Promise<ProviderStreamResult> {
     const pool = this.pool;
     const apiKey = process.env.GOOGLE_API_KEY || '';
+    
+    // CRITICAL: Google Gemini API requires system messages to be in systemInstruction field,
+    // not in the contents array. Separate system messages from conversation messages.
+    const systemMessages = messages.filter(m => m.role === 'system');
+    const conversationMessages = messages.filter(m => m.role !== 'system');
+    
+    // Combine all system messages into a single systemInstruction
+    const systemInstruction = systemMessages.length > 0
+      ? systemMessages.map(m => m.content).join('\n\n')
+      : undefined;
+    
     return {
       async *[Symbol.asyncIterator]() {
+        // Process conversation messages, including images
+        const processedContents = await Promise.all(
+          conversationMessages.map(async (m) => {
+            const parts: Array<{ text?: string; inline_data?: { mime_type: string; data: string } }> = [];
+            
+            // Add text content if present
+            if (m.content && m.content.trim()) {
+              parts.push({ text: m.content });
+            }
+            
+            // Process image attachments
+            if (m.attachments && m.attachments.length > 0) {
+              for (const attachment of m.attachments) {
+                // Only process image attachments
+                if (attachment.mimeType.startsWith('image/') && attachment.url) {
+                  try {
+                    const imageData = await fetchImageAsBase64(attachment.url);
+                    parts.push({
+                      inline_data: {
+                        mime_type: imageData.mimeType,
+                        data: imageData.data,
+                      },
+                    });
+                    logger.debug({ 
+                      attachmentId: attachment.id, 
+                      mimeType: imageData.mimeType,
+                      url: attachment.url 
+                    }, 'Added image to Gemini request');
+                  } catch (error) {
+                    logger.error({ 
+                      error, 
+                      attachmentId: attachment.id,
+                      url: attachment.url 
+                    }, 'Failed to process image attachment, skipping');
+                    // Continue without this image
+                  }
+                }
+              }
+            }
+            
+            // If no parts were added (no text and no images), add empty text
+            if (parts.length === 0) {
+              parts.push({ text: '' });
+            }
+            
+            return {
+              role: m.role === 'assistant' ? 'model' : 'user',
+              parts,
+            };
+          })
+        );
+        
+        // Build request body with proper systemInstruction handling
+        const requestBody: any = {
+          contents: processedContents,
+          generationConfig: {
+            maxOutputTokens: options?.max_tokens,
+            temperature: options?.temperature,
+          },
+        };
+        
+        // Only include systemInstruction if we have system messages
+        if (systemInstruction) {
+          requestBody.systemInstruction = {
+            parts: [{ text: systemInstruction }],
+          };
+        }
+        
         const response = await pool.request({
           path: `/v1beta/models/${model}:streamGenerateContent?key=${apiKey}`,
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            contents: messages.map((m) => ({
-              role: m.role === 'assistant' ? 'model' : 'user',
-              parts: [{ text: m.content }],
-            })),
-            generationConfig: {
-              maxOutputTokens: options?.max_tokens,
-              temperature: options?.temperature,
-            },
-          }),
+          body: JSON.stringify(requestBody),
         });
 
         if (response.statusCode !== 200) {
@@ -151,12 +258,22 @@ export class GoogleProvider extends BaseProvider {
   }
 
   estimate(
-    messages: Array<{ role: 'user' | 'assistant' | 'system'; content: string }>,
+    messages: Array<MessageWithAttachments>,
     _model: string
   ): number {
     const systemPrompt = 4;
     const perMessage = 4;
     const contentTokens = messages.reduce((sum, m) => sum + this.estimateTokens(m.content), 0);
-    return systemPrompt + messages.length * perMessage + contentTokens;
+    
+    // Add token estimate for images (rough estimate: ~170 tokens per image)
+    const imageTokens = messages.reduce((sum, m) => {
+      if (m.attachments) {
+        const imageCount = m.attachments.filter(a => a.mimeType.startsWith('image/')).length;
+        return sum + (imageCount * 170);
+      }
+      return sum;
+    }, 0);
+    
+    return systemPrompt + messages.length * perMessage + contentTokens + imageTokens;
   }
 }

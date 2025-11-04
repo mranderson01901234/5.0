@@ -29,6 +29,32 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+html, body {
+  height: 100%;
+  /* Removed overflow: hidden - was blocking all scrolling */
+}
+
+/* Force internal scroll containers to work */
+.chat-container {
+  overflow-y: auto !important;
+  overflow-x: hidden !important;
+  -webkit-overflow-scrolling: touch !important;
+  overscroll-behavior: contain !important;
+  position: relative !important;
+  will-change: scroll-position !important;
+}
+
+/* Artifact scroll container - NO SCROLLING */
+#artifact-scroll {
+  overflow-y: hidden !important;
+  overflow-x: hidden !important;
+  overscroll-behavior: contain !important;
+  position: relative !important;
+}
+
+/* Note: .chat-container adds position: relative (see below) */
+/* Note: #artifact-scroll adds CSS containment, touch-action, scroll-behavior (see below) */
+
 body {
   @apply bg-[#0f0f0f] text-white/95 antialiased;
   font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
@@ -83,6 +109,36 @@ body::before {
   border: 1px solid rgba(255, 255, 255, 0.15);
 }
 
+/* Premium Dark Scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.08) transparent;
+}
+
 /* Chat input textarea - ensure proper inline rendering of mathematical notation */
 /* Prevents subscripts/superscripts from stacking vertically */
 .math-input,
@@ -99,14 +155,25 @@ textarea.math-input {
   overflow-y: auto;
   /* Ensure inline rendering - prevent vertical stacking */
   vertical-align: baseline;
+  /* Default font size - can be overridden by Tailwind classes */
   font-size: 15px;
   letter-spacing: normal;
+}
+
+/* Allow Tailwind text size classes to override the default font-size */
+textarea.math-input.text-2xl {
+  font-size: 1.5rem; /* text-2xl = 1.5rem */
 }
 
 /* Ensure subscripts and superscripts in input render inline */
 textarea.math-input::placeholder {
   line-height: 1.5;
   vertical-align: baseline;
+}
+
+/* Ensure placeholder text matches the input text size when text-2xl is applied */
+textarea.math-input.text-2xl::placeholder {
+  font-size: 1.5rem; /* text-2xl = 1.5rem */
 }
 
 /* Anthropic Claude default typography */
@@ -442,6 +509,20 @@ textarea.math-input::placeholder {
 /* Chat layout with fixed user message and scrollable history */
 .chat-container {
   position: relative;
+  /* Scroll properties defined in combined rule above (.chat-container, #artifact-scroll) */
+}
+
+/* Artifact scroll container - hard isolation via CSS containment - NO SCROLLING */
+#artifact-scroll {
+  contain: layout paint; /* Remove 'size' to allow dynamic height */
+  isolation: isolate;
+  /* No scrolling on artifact pane - only chat side scrolls */
+}
+
+/* Sticky footer matches body background with overlay effect */
+.chat-footer {
+  background: #0f0f0f;
+  backdrop-filter: blur(10px);
 }
 
 /* Fixed user message - stays at top-right position */
@@ -480,5 +561,62 @@ textarea.math-input::placeholder {
 .message-actions button:hover {
   color: rgba(255, 255, 255, 0.8);
   background-color: rgba(255, 255, 255, 0.1);
+}
+
+/* Shift input container when sidebar is expanded (hovered) */
+.group:hover ~ main .chat-input-container,
+aside.group:hover ~ main .chat-input-container {
+  left: 280px;
+}
+
+/* Allow artifact pane root - NO SCROLLING AT ALL */
+.artifact-pane {
+  overflow: hidden !important; /* Prevent pane-level scroll */
+  overscroll-behavior: none !important; /* Prevent scroll chaining to parent */
+}
+
+/* Prevent scrolling on artifact root container */
+#artifact-root {
+  overflow: hidden !important;
+  overscroll-behavior: none !important;
+}
+
+/* Additional artifact scroll container properties - NO SCROLLING */
+#artifact-scroll {
+  /* NO scrolling on artifact pane - scroll removed */
+  touch-action: none; /* Disable touch scrolling */
+  scroll-behavior: auto; /* No smooth scrolling needed */
+}
+
+/* Custom dark-themed scrollbar for artifact tables and content */
+.artifact-table-scroll::-webkit-scrollbar,
+.artifact-content-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.artifact-table-scroll::-webkit-scrollbar-track,
+.artifact-content-scroll::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+}
+
+.artifact-table-scroll::-webkit-scrollbar-thumb,
+.artifact-content-scroll::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+
+.artifact-table-scroll::-webkit-scrollbar-thumb:hover,
+.artifact-content-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+/* Firefox scrollbar styling */
+.artifact-table-scroll,
+.artifact-content-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.2) rgba(255, 255, 255, 0.05);
 }
 
