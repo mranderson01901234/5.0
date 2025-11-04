@@ -15,6 +15,7 @@ import { initializeExportQueue, getExportQueue } from './queue.js';
 import { initializeExportWorker, closeExportWorker } from './workers/exportWorker.js';
 import { initializeWebSocketServer, closeWebSocketServer } from './websocket.js';
 import { telemetryStore } from './telemetry.js';
+import { startUnlimitedRecallWorker, stopUnlimitedRecallWorker } from './unlimited-recall-worker.js';
 
 const app = Fastify({
   logger: false,
@@ -58,6 +59,9 @@ await initializeRedis();
 initializeExportQueue();
 initializeExportWorker();
 
+// Initialize unlimited recall worker
+startUnlimitedRecallWorker();
+
 await registerRoutes(app);
 
 // Use service-specific port env var if available, fallback to PORT, then default
@@ -92,7 +96,10 @@ const shutdown = async () => {
   
   // Close export worker
   await closeExportWorker();
-  
+
+  // Close unlimited recall worker
+  stopUnlimitedRecallWorker();
+
   // Close export queue
   const queue = getExportQueue();
   if (queue) {

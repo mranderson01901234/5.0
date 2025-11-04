@@ -4,6 +4,8 @@ import { logger } from './log.js';
 import type { Message } from './types.js';
 import { preprocessContext } from './ContextPreprocessor.js';
 import { MemoryRecallStabilizer } from './MemoryRecallStabilizer.js';
+import { getUnlimitedRecallLoader } from './unlimited-recall-loader.js';
+import { shouldTriggerRecall } from './unlimited-recall-triggers.js';
 
 export class ContextTrimmer {
   private config = loadConfig();
@@ -42,6 +44,59 @@ export class ContextTrimmer {
     const recentMessages = allMessages.slice(0, keepLast * 2).reverse();
     let trimmed: Array<{ role: 'user' | 'assistant' | 'system'; content: string }> = [];
     let tokenCount = 0;
+
+    // UNLIMITED RECALL: Check if user wants to recall past conversations
+    if (userId) {
+      const lastUserMessage = messages.filter(m => m.role === 'user').pop();
+      if (lastUserMessage && shouldTriggerRecall(lastUserMessage.content, messages)) {
+        try {
+          const recallLoader = getUnlimitedRecallLoader();
+          const recalled = await recallLoader.handleRecall(
+            userId,
+            threadId,
+            lastUserMessage.content,
+            { maxTokens: maxInputTokens * 0.5 } // Use up to 50% of budget for recalled conversation
+          );
+
+          if (recalled) {
+            // Format recalled conversation
+            let recallContent = `[Previous conversation: "${recalled.conversationLabel}"]\n\n`;
+
+            if (recalled.summary) {
+              recallContent += `Summary: ${recalled.summary}\n\n`;
+            }
+
+            if (recalled.messages.length > 0) {
+              recallContent += recalled.messages
+                .map(m => `${m.role}: ${m.content}`)
+                .join('\n\n');
+            }
+
+            // Inject as system message
+            trimmed.push({
+              role: 'system',
+              content: recallContent
+            });
+
+            tokenCount += recalled.tokenCount;
+
+            logger.info({
+              userId,
+              threadId,
+              strategy: recalled.strategy,
+              tokens: recalled.tokenCount,
+              conversationLabel: recalled.conversationLabel
+            }, 'Injected unlimited recall context');
+          }
+        } catch (error: any) {
+          logger.error({
+            error: error.message,
+            userId,
+            threadId
+          }, 'Unlimited recall failed, continuing without it');
+        }
+      }
+    }
 
     // Fetch and add memories from memory service
     // CRITICAL: Always recall user memories directly (explicit "remember" saves need to be recalled)
