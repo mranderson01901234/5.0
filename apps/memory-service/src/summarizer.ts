@@ -74,22 +74,31 @@ async function generateSummaryWithGoogle(model: string, messages: Array<{ conten
   if (!googleKey) return null;
   
   try {
-    const recentMessages = messages.slice(-20);
+    // ENHANCED: Include more messages (up to 50) for better context
+    const recentMessages = messages.slice(-50);
     const systemMessages = recentMessages.filter(m => m.role === 'system');
     const conversationMessages = recentMessages.filter(m => m.role !== 'system');
     
-    const systemInstruction = 'Summarize this conversation in 1-2 sentences. Focus on the main topic and key points discussed. Be concise.';
+    // ENHANCED: More comprehensive prompt that extracts structured information
+    const systemInstruction = `Create a comprehensive summary of this conversation that captures:
+1. Main topic and purpose
+2. Key decisions made or conclusions reached
+3. Important facts, preferences, or information shared
+4. Action items or next steps mentioned
+5. Any unresolved questions or open topics
+
+Be thorough but concise (3-5 sentences). Focus on what would be useful to recall in future conversations. Include specific details like names, preferences, decisions, and outcomes.`;
     
     const requestBody: any = {
       contents: conversationMessages.map((m) => ({
         role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content.substring(0, 1000) }],
+        parts: [{ text: m.content.substring(0, 2000) }], // ENHANCED: Increased from 1000 to 2000 chars
       })),
       systemInstruction: {
         parts: [{ text: systemInstruction }],
       },
       generationConfig: {
-        maxOutputTokens: 100,
+        maxOutputTokens: 300, // ENHANCED: Increased from 100 to 300 tokens
         temperature: 0.3,
       },
     };
@@ -114,7 +123,8 @@ async function generateSummaryWithGoogle(model: string, messages: Array<{ conten
       return null;
     }
     
-    return text.substring(0, 200);
+    // ENHANCED: Increased limit from 200 to 500 chars for more complete summaries
+    return text.substring(0, 500);
   } catch {
     return null;
   }
@@ -128,11 +138,22 @@ async function generateSummaryWithOpenAI(model: string, messages: Array<{ conten
   if (!openaiKey) return null;
   
   try {
-    const recentMessages = messages.slice(-20);
+    // ENHANCED: Include more messages (up to 50) for better context
+    const recentMessages = messages.slice(-50);
     const formattedMessages = recentMessages.map(m => ({
       role: m.role === 'assistant' ? 'assistant' : 'user',
-      content: m.content.substring(0, 1000),
+      content: m.content.substring(0, 2000), // ENHANCED: Increased from 1000 to 2000 chars
     }));
+
+    // ENHANCED: More comprehensive prompt that extracts structured information
+    const systemPrompt = `Create a comprehensive summary of this conversation that captures:
+1. Main topic and purpose
+2. Key decisions made or conclusions reached
+3. Important facts, preferences, or information shared
+4. Action items or next steps mentioned
+5. Any unresolved questions or open topics
+
+Be thorough but concise (3-5 sentences). Focus on what would be useful to recall in future conversations. Include specific details like names, preferences, decisions, and outcomes.`;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
@@ -145,11 +166,11 @@ async function generateSummaryWithOpenAI(model: string, messages: Array<{ conten
         messages: [
           {
             role: 'system',
-            content: 'Summarize this conversation in 1-2 sentences. Focus on the main topic and key points discussed. Be concise.'
+            content: systemPrompt
           },
           ...formattedMessages
         ],
-        max_tokens: 100,
+        max_tokens: 300, // ENHANCED: Increased from 100 to 300 tokens
         temperature: 0.3,
       }),
     });
@@ -165,7 +186,8 @@ async function generateSummaryWithOpenAI(model: string, messages: Array<{ conten
       return null;
     }
 
-    return summary.substring(0, 200);
+    // ENHANCED: Increased limit from 200 to 500 chars for more complete summaries
+    return summary.substring(0, 500);
   } catch {
     return null;
   }
@@ -173,7 +195,7 @@ async function generateSummaryWithOpenAI(model: string, messages: Array<{ conten
 
 /**
  * Generate a conversation summary using default model (OpenAI or Google)
- * Returns first 200 chars of first user message if API unavailable
+ * Returns enhanced fallback summary if API unavailable
  */
 export async function generateSummary(messages: Array<{ content: string; role: string }>): Promise<string> {
   const { provider, model } = getDefaultProvider();
@@ -243,13 +265,41 @@ export async function generateSummary(messages: Array<{ content: string; role: s
 }
 
 /**
- * Fallback: Use first user message as summary
+ * Fallback: Create a more informative summary from first user message and key information
  */
 function getFallbackSummary(messages: Array<{ content: string; role: string }>): string {
   const firstUserMsg = messages.find(m => m.role === 'user');
+  const lastUserMsg = messages.filter(m => m.role === 'user').pop();
+  
+  // Try to extract key information from messages
+  const userMessages = messages.filter(m => m.role === 'user');
+  const assistantMessages = messages.filter(m => m.role === 'assistant');
+  
+  // Build a more informative fallback summary
+  const parts: string[] = [];
+  
   if (firstUserMsg) {
-    return firstUserMsg.content.substring(0, 200);
+    // Extract topic from first message (first 100 chars)
+    const topic = firstUserMsg.content.substring(0, 100).trim();
+    if (topic.length > 20) {
+      parts.push(topic);
+    }
   }
-  return 'Conversation';
+  
+  // Add context about conversation length
+  if (userMessages.length > 1) {
+    parts.push(`(${userMessages.length} exchanges)`);
+  }
+  
+  // Include last user message if different from first
+  if (lastUserMsg && lastUserMsg !== firstUserMsg && lastUserMsg.content.length > 20) {
+    const lastTopic = lastUserMsg.content.substring(0, 80).trim();
+    if (lastTopic.length > 20) {
+      parts.push(`Latest: ${lastTopic}`);
+    }
+  }
+  
+  const summary = parts.join(' ').substring(0, 500);
+  return summary || 'Conversation';
 }
 

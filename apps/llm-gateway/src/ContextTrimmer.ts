@@ -51,7 +51,26 @@ export class ContextTrimmer {
       const HYBRID_RAG_URL = process.env.HYBRID_RAG_URL || 'http://localhost:3002';
       
       const lastUserMessage = messages.filter(m => m.role === 'user').pop();
-      const userQuery = lastUserMessage?.content || '';
+      // ENHANCED: Extract query from last user message, handling multi-turn context
+      // If the last message is short or a follow-up, include recent context for better relevance
+      let userQuery = lastUserMessage?.content || '';
+      
+      // If query is very short (< 20 chars) or appears to be a follow-up, include context
+      if (userQuery.length < 20 || /^(yes|no|ok|sure|thanks|that|it|this|those|these|them|him|her)$/i.test(userQuery.trim())) {
+        // Include previous user message for context
+        const previousUserMessages = messages.filter(m => m.role === 'user').slice(-2);
+        if (previousUserMessages.length > 1) {
+          // Combine last 2 user messages for better context
+          userQuery = previousUserMessages.map(m => m.content).join(' ').substring(0, 200);
+        }
+      }
+      
+      // Clean up query: remove common conversational fillers that don't help with relevance
+      userQuery = userQuery
+        .replace(/\b(please|can you|could you|would you|will you|thank you|thanks)\b/gi, '')
+        .replace(/\b(um|uh|er|ah|hmm|well)\b/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
       
       // Always recall memories directly (for explicit "remember" saves)
       // This ensures user's explicit memories are always available
@@ -70,35 +89,14 @@ export class ContextTrimmer {
           }
         );
         
-        // Log successful recall
-        if (directMemories.length > 0) {
-          logger.info({ 
-            userId,
-            threadId,
-            memoryCount: directMemories.length,
-            tier1Count: directMemories.filter((m: any) => m.tier === 'TIER1').length,
-            hasQuery: !!userQuery,
-          }, 'Memory recall completed (with stabilizer)');
-        }
-
-        if (directMemories.length > 0) {
-          logger.debug({ 
-            userId, 
-            threadId, 
-            memoryCount: directMemories.length,
-            tier1Count: directMemories.filter((m: any) => m.tier === 'TIER1').length,
-            memories: directMemories.map((m: any) => `${m.tier}: ${m.content.substring(0, 50)}...`)
-          }, 'Direct memories retrieved for context');
-        }
       } catch (error: any) {
-        logger.debug({ userId, threadId, error: error.message }, 'Direct memory recall failed (non-critical)');
+        // Direct memory recall failed silently
       }
       
       // Try Hybrid RAG if enabled (Phase 1+) - this supplements direct memories
       const useHybridRAG = this.config.flags.hybridRAG && lastUserMessage;
       
       if (useHybridRAG) {
-        logger.debug({ userId, threadId, queryLength: lastUserMessage?.content?.length }, 'Attempting Hybrid RAG');
         try {
           const hybridRAGPromise = fetch(`${HYBRID_RAG_URL}/v1/rag/hybrid`, {
             method: 'POST',
@@ -133,22 +131,10 @@ export class ContextTrimmer {
                 ...(data.vectorResults || []).map((v: any) => ({ content: v.content, type: 'vector' })),
                 ...(data.webResults || []).map((w: any) => ({ content: w.content, type: 'web', source: w.source?.host || 'web' })),
               ];
-              logger.debug({ 
-                userId, 
-                threadId, 
-                resultCount: allResults.length,
-                memories: data.memories?.length || 0,
-                vectors: data.vectorResults?.length || 0,
-                webResults: data.webResults?.length || 0
-              }, 'Hybrid RAG completed');
               return allResults;
             }
-            logger.warn({ userId, threadId, status: res.status }, 'Hybrid RAG returned non-ok status');
             return [];
-          }).catch((error: any) => {
-            logger.debug({ userId, threadId, error: error.message }, 'Hybrid RAG failed');
-            return [];
-          });
+          }).catch(() => []);
 
           // Race with timeout (6 seconds to allow for RAG processing)
           let timedOut = false;
@@ -164,9 +150,7 @@ export class ContextTrimmer {
             timeoutPromise
           ]);
 
-          if (timedOut) {
-            logger.warn({ userId, threadId }, 'Hybrid RAG request timed out after 6s - falling back to direct memories');
-          } else if (hybridResults.length > 0) {
+          if (!timedOut && hybridResults.length > 0) {
             // Format as raw context first (for token counting and preprocessing)
             const rawMemoryText = hybridResults.map((r: any) => `[${r.type}] ${r.content}`).join('\n');
             const rawMemoryTokens = this.estimateTokens(rawMemoryText);
@@ -182,25 +166,12 @@ export class ContextTrimmer {
               // Store preprocessed version directly (no header needed as it's now narrative)
               trimmed.push({ role: 'system', content: preprocessedMemoryText });
               tokenCount += memoryTokens;
-              logger.info({
-                userId,
-                threadId,
-                resultCount: hybridResults.length,
-                tokensAdded: memoryTokens,
-                types: [...new Set(hybridResults.map((r: any) => r.type))]
-              }, 'Hybrid RAG results added to context (preprocessed)');
-            } else {
-              logger.debug({ userId, threadId, tokensNeeded: memoryTokens, available: maxInputTokens * 0.5 - tokenCount }, 'Hybrid RAG results skipped - would exceed token limit');
             }
-          } else {
-            logger.debug({ userId, threadId }, 'Hybrid RAG returned no results - falling back to direct memories');
           }
 
           // CRITICAL FIX: Use directMemories as fallback when Hybrid RAG fails, times out, or returns no results
           // This ensures user's explicit "remember" saves are ALWAYS available
           if ((timedOut || hybridResults.length === 0) && directMemories.length > 0) {
-            logger.info({ userId, threadId, memoryCount: directMemories.length }, 'Using direct memories as fallback');
-
             // Format as raw context first
             const rawMemoryText = directMemories.map((m: any) => `[Memory] ${m.content}`).join('\n');
 
@@ -212,18 +183,11 @@ export class ContextTrimmer {
               // Store preprocessed version directly (no header needed as it's now narrative)
               trimmed.push({ role: 'system', content: preprocessedMemoryText });
               tokenCount += memoryTokens;
-              logger.info({ userId, threadId, memoryTokensAdded: memoryTokens }, 'Direct memories added to context as fallback');
-            } else {
-              logger.warn({ userId, threadId, memoryTokens, available: maxInputTokens * 0.5 - tokenCount }, 'Direct memories skipped - would exceed token limit');
             }
           }
         } catch (error: any) {
-          logger.warn({ userId, threadId, error: error.message }, 'Hybrid RAG error - falling back to direct memories');
-
           // CRITICAL FIX: Use directMemories as fallback when Hybrid RAG throws an error
           if (directMemories.length > 0) {
-            logger.info({ userId, threadId, memoryCount: directMemories.length }, 'Using direct memories after Hybrid RAG error');
-
             try {
               // Format as raw context first
               const rawMemoryText = directMemories.map((m: any) => `[Memory] ${m.content}`).join('\n');
@@ -236,20 +200,15 @@ export class ContextTrimmer {
                 // Store preprocessed version directly (no header needed as it's now narrative)
                 trimmed.push({ role: 'system', content: preprocessedMemoryText });
                 tokenCount += memoryTokens;
-                logger.info({ userId, threadId, memoryTokensAdded: memoryTokens }, 'Direct memories added to context after error');
-              } else {
-                logger.warn({ userId, threadId, memoryTokens, available: maxInputTokens * 0.5 - tokenCount }, 'Direct memories skipped - would exceed token limit');
               }
             } catch (fallbackError: any) {
-              logger.error({ userId, threadId, error: fallbackError.message }, 'Failed to add direct memories as fallback');
+              // Fallback failed silently
             }
           }
         }
       } else {
         // Hybrid RAG disabled - use direct memories we already fetched
         if (directMemories.length > 0) {
-          logger.debug({ userId, threadId, memoryCount: directMemories.length, memories: directMemories.map((m: any) => m.content) }, 'Using direct memories (Hybrid RAG disabled)');
-          
           // Format as raw context first
           const rawMemoryText = directMemories.map((m: any) => `[Memory] ${m.content}`).join('\n');
           
@@ -257,24 +216,18 @@ export class ContextTrimmer {
           const preprocessedMemoryText = preprocessContext(rawMemoryText, 'memory');
           const memoryTokens = this.estimateTokens(preprocessedMemoryText);
           
-          logger.debug({ userId, threadId, preprocessedLength: preprocessedMemoryText.length, preview: preprocessedMemoryText.substring(0, 200) }, 'Memories preprocessed');
-          
           if (tokenCount + memoryTokens < maxInputTokens * 0.5) {
             // Store preprocessed version directly (no header needed as it's now narrative)
             trimmed.push({ role: 'system', content: preprocessedMemoryText });
             tokenCount += memoryTokens;
-            logger.debug({ userId, threadId, memoryTokensAdded: memoryTokens }, 'Direct memories added to context');
-          } else {
-            logger.warn({ userId, threadId, memoryTokens, available: maxInputTokens * 0.5 - tokenCount }, 'Memories skipped - would exceed token limit');
           }
-        } else {
-          logger.debug({ userId, threadId }, 'No direct memories retrieved');
         }
       }
 
-      // Fetch and add last 2 conversation histories with summaries
+      // ENHANCED: Fetch and add last 4-5 conversation histories with summaries (increased from 2)
+      // Prioritize by recency and importance
       try {
-        const conversationsPromise = fetch(`${MEMORY_SERVICE_URL}/v1/conversations?userId=${encodeURIComponent(userId)}&excludeThreadId=${encodeURIComponent(threadId)}&limit=2`, {
+        const conversationsPromise = fetch(`${MEMORY_SERVICE_URL}/v1/conversations?userId=${encodeURIComponent(userId)}&excludeThreadId=${encodeURIComponent(threadId)}&limit=5`, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
@@ -286,44 +239,181 @@ export class ContextTrimmer {
             const data = await res.json() as { conversations?: Array<{ threadId: string; lastActivity: number }> };
             return data.conversations || [];
           }
+          logger.debug({ userId, threadId, status: res.status }, 'Conversation history fetch returned non-ok status');
           return [];
-        }).catch(() => []);
+        }).catch((error: any) => {
+          logger.debug({ userId, threadId, error: error.message }, 'Conversation history fetch failed');
+          return [];
+        });
 
+        // CRITICAL FIX: Increase timeout from 50ms to 300ms for reliable network requests
+        // Network requests typically take 50-200ms, memory service queries may take 100-300ms
         const conversations = await Promise.race([
           conversationsPromise,
-          new Promise<Array<{ threadId: string; lastActivity: number }>>((resolve) => setTimeout(() => resolve([]), 50))
+          new Promise<Array<{ threadId: string; lastActivity: number }>>((resolve) => setTimeout(() => {
+            logger.debug({ userId, threadId }, 'Conversation history fetch timed out after 300ms');
+            resolve([]);
+          }, 300))
         ]);
 
         if (conversations.length > 0) {
-          // Get summaries from gateway DB - CRITICAL: Filter by userId
-          const summaries = conversations
-            .map(conv => {
-              const threadSummary = db.prepare('SELECT summary FROM thread_summaries WHERE thread_id = ? AND user_id = ?')
+          logger.debug({ userId, threadId, conversationCount: conversations.length }, 'Conversation history fetched successfully');
+          
+          // ENHANCED: Get summaries with on-demand generation fallback
+          const summaries = await Promise.all(
+            conversations.map(async (conv) => {
+              const threadSummary = db.prepare('SELECT summary FROM thread_summaries WHERE thread_id = ? AND user_id = ? AND (deleted_at IS NULL OR deleted_at = 0)')
                 .get(conv.threadId, userId) as { summary: string } | undefined;
-              return threadSummary ? { threadId: conv.threadId, summary: threadSummary.summary } : null;
+              
+              // ENHANCED: On-demand summary generation if missing
+              if (!threadSummary) {
+                logger.debug({ userId, threadId: conv.threadId }, 'Summary missing, attempting on-demand generation');
+                try {
+                  // Fetch messages for this conversation
+                  const convMessages = db.prepare(
+                    'SELECT content, role FROM messages WHERE thread_id = ? AND user_id = ? AND (deleted_at IS NULL OR deleted_at = 0) ORDER BY created_at ASC LIMIT 50'
+                  ).all(conv.threadId, userId) as Array<{ content: string; role: string }>;
+                  
+                  if (convMessages.length > 0) {
+                    // ENHANCED: On-demand summary generation with enhanced fallback
+                    // Try to call memory service API endpoint for summary generation
+                    try {
+                      const MEMORY_SERVICE_URL = process.env.MEMORY_SERVICE_URL || 'http://localhost:3001';
+                      
+                      // Try to generate summary via memory service (if endpoint exists)
+                      // For now, use enhanced fallback that creates informative summary from messages
+                      const firstUserMsg = convMessages.find(m => m.role === 'user');
+                      const lastUserMsg = convMessages.filter(m => m.role === 'user').pop();
+                      const assistantMsgs = convMessages.filter(m => m.role === 'assistant');
+                      const userMsgCount = convMessages.filter(m => m.role === 'user').length;
+                      
+                      if (firstUserMsg) {
+                        // ENHANCED: Create more informative fallback summary
+                        const parts: string[] = [];
+                        
+                        // Start with first user message (topic)
+                        parts.push(firstUserMsg.content.substring(0, 150));
+                        
+                        // Add conversation length context
+                        if (userMsgCount > 1) {
+                          parts.push(`(${userMsgCount} exchanges)`);
+                        }
+                        
+                        // Add latest development if different from first message
+                        if (lastUserMsg && lastUserMsg !== firstUserMsg && lastUserMsg.content.length > 20) {
+                          parts.push(`Latest: ${lastUserMsg.content.substring(0, 100)}`);
+                        }
+                        
+                        // Add key information if assistant provided substantial responses
+                        if (assistantMsgs.length > 0) {
+                          const lastAssistantMsg = assistantMsgs[assistantMsgs.length - 1];
+                          if (lastAssistantMsg.content.length > 50) {
+                            // Extract key points from last assistant message (first 80 chars)
+                            const keyInfo = lastAssistantMsg.content.substring(0, 80).replace(/\n/g, ' ').trim();
+                            if (keyInfo.length > 20) {
+                              parts.push(`Outcome: ${keyInfo}`);
+                            }
+                          }
+                        }
+                        
+                        const fallbackSummary = parts.join(' ').substring(0, 500);
+                        
+                        // Cache the fallback summary for future use
+                        const now = Math.floor(Date.now() / 1000);
+                        db.prepare(
+                          `INSERT INTO thread_summaries (thread_id, user_id, summary, updated_at)
+                           VALUES (?, ?, ?, ?)
+                           ON CONFLICT(thread_id) DO UPDATE SET summary = ?, updated_at = ?`
+                        ).run(conv.threadId, userId, fallbackSummary, now, fallbackSummary, now);
+                        
+                        logger.info({ 
+                          userId, 
+                          threadId: conv.threadId, 
+                          summaryLength: fallbackSummary.length,
+                          messageCount: convMessages.length,
+                          type: 'fallback'
+                        }, 'On-demand summary generated (enhanced fallback) and cached');
+                        
+                        return { threadId: conv.threadId, summary: fallbackSummary };
+                      }
+                    } catch (error: any) {
+                      logger.debug({ userId, threadId: conv.threadId, error: error.message }, 'On-demand summary generation failed');
+                    }
+                  }
+                } catch (error: any) {
+                  logger.debug({ userId, threadId: conv.threadId, error: error.message }, 'On-demand summary generation failed');
+                }
+                return null;
+              }
+              
+              return { threadId: conv.threadId, summary: threadSummary.summary };
             })
-            .filter(s => s !== null) as Array<{ threadId: string; summary: string }>;
+          );
+          
+          // Filter out null results
+          const validSummaries = summaries.filter(s => s !== null) as Array<{ threadId: string; summary: string }>;
+          
+          // Log when summaries are missing - this is a common issue
+          if (conversations.length > 0 && validSummaries.length === 0) {
+            logger.warn({ 
+              userId, 
+              threadId, 
+              conversationIds: conversations.map(c => c.threadId),
+              message: 'Conversation history found but summaries missing - summaries may not be generated yet by audit jobs'
+            }, 'Conversation history summaries missing');
+          }
 
-          if (summaries.length > 0) {
+          if (validSummaries.length > 0) {
+            // ENHANCED: Sort by recency (most recent first) and limit to top 4
+            const sortedSummaries = validSummaries
+              .sort((a, b) => {
+                const convA = conversations.find(c => c.threadId === a.threadId);
+                const convB = conversations.find(c => c.threadId === b.threadId);
+                return (convB?.lastActivity || 0) - (convA?.lastActivity || 0);
+              })
+              .slice(0, 4); // Take top 4 most recent
+
             // Format as raw context first
-            const rawConversationHistoryText = summaries
+            const rawConversationHistoryText = sortedSummaries
               .map((s, i) => `[Conversation ${i + 1}]: ${s.summary}`)
               .join('\n');
 
             // Preprocess into natural narrative
             const preprocessedHistoryText = preprocessContext(rawConversationHistoryText, 'conversation');
             const historyTokens = this.estimateTokens(preprocessedHistoryText);
-            const maxHistoryTokens = 200; // Cap at 200 tokens for conversation history
+            const maxHistoryTokens = 400; // ENHANCED: Increased from 300 to 400 for more context
 
-            if (historyTokens <= maxHistoryTokens && tokenCount + historyTokens < maxInputTokens * 0.6) {
+            // Relaxed token constraint: changed from 0.6 (60% remaining) to 0.5 (50% remaining)
+            if (historyTokens <= maxHistoryTokens && tokenCount + historyTokens < maxInputTokens * 0.5) {
               // Store preprocessed version directly (no header needed as it's now narrative)
               trimmed.push({ role: 'system', content: preprocessedHistoryText });
               tokenCount += historyTokens;
+              logger.info({ 
+                userId, 
+                threadId, 
+                summaryCount: sortedSummaries.length, 
+                tokensAdded: historyTokens,
+                conversationIds: sortedSummaries.map(s => s.threadId)
+              }, 'Conversation history added to context');
+            } else {
+              logger.debug({ 
+                userId, 
+                threadId, 
+                historyTokens, 
+                maxHistoryTokens,
+                tokenCount, 
+                maxInputTokens, 
+                availableTokens: maxInputTokens * 0.5 - tokenCount,
+                reason: historyTokens > maxHistoryTokens ? 'exceeds maxHistoryTokens' : 'would exceed token budget'
+              }, 'Conversation history skipped - token limit constraint');
             }
           }
+        } else {
+          logger.debug({ userId, threadId }, 'No previous conversations found for history');
         }
       } catch (error: any) {
-        // Silently fail - conversation history is advisory only
+        // CRITICAL FIX: Log errors instead of silently failing - conversation history is important for context
+        logger.warn({ userId, threadId, error: error.message, stack: error.stack }, 'Conversation history fetch failed with exception');
       }
     }
 

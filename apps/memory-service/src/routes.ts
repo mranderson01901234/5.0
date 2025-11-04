@@ -23,6 +23,8 @@ import { invalidateUserProfile } from './userProfile.js';
 import { generateEmbedding, getOrGenerateEmbedding, addToEmbeddingQueue } from './embedding-service.js';
 import { hybridSearch, keywordOnlySearch } from './vector-search.js';
 import { deduplicateMemoriesByTopic, deduplicateBySemanticSimilarity } from './memory-prioritizer.js';
+import { preprocessQuery } from './query-preprocessor.js';
+import { calculateRelevanceScore } from './relevance-scorer.js';
 
 const QUALITY_THRESHOLD = 0.65;
 
@@ -461,10 +463,76 @@ export function registerRoutes(
               searchType = 'keyword';
             }
 
-            // Post-processing: smart deduplication using intelligent prioritization
+            // Post-processing: filter by relevance score and apply smart deduplication
             if (query && query.trim() && memories.length > 0) {
+              // CRITICAL: Calculate relevance scores for all memories and filter by minimum threshold
+              // This ensures only memories that are actually relevant to the query are returned
+              const processed = preprocessQuery(query);
+              const baseScores = new Map<string, number>();
+              
+              // Calculate base scores (from search results)
+              memories.forEach((mem, idx) => {
+                // Base score from search ranking (higher rank = higher score)
+                const rankScore = 1.0 - (idx / memories.length) * 0.5; // 0.5 to 1.0 range
+                baseScores.set(mem.id, rankScore);
+              });
+              
+              // Calculate enhanced relevance scores
+              const relevanceScores = new Map<string, number>();
+              const MIN_RELEVANCE_THRESHOLD = parseFloat(process.env.MIN_MEMORY_RELEVANCE_THRESHOLD || '0.25');
+              
+              for (const memory of memories) {
+                const baseScore = baseScores.get(memory.id) || 0;
+                const enhancedScore = calculateRelevanceScore(
+                  memory,
+                  processed,
+                  baseScore,
+                  {
+                    boostPhrases: true,
+                    boostPosition: true,
+                    boostTier: true,
+                    boostPriority: true,
+                    boostRecency: true,
+                  }
+                );
+                relevanceScores.set(memory.id, enhancedScore);
+              }
+              
+              // Filter out memories below relevance threshold
+              const relevantMemories = memories.filter(mem => {
+                const score = relevanceScores.get(mem.id) || 0;
+                
+                // Always include TIER1 memories (explicit saves) if they have any keyword match
+                if (mem.tier === 'TIER1') {
+                  const hasKeywordMatch = processed.keywords.some(kw => 
+                    mem.content.toLowerCase().includes(kw.toLowerCase())
+                  ) || processed.phrases.some(phrase => 
+                    mem.content.toLowerCase().includes(phrase.toLowerCase())
+                  );
+                  if (hasKeywordMatch) return true;
+                }
+                
+                // Require minimum relevance score for all other memories
+                return score >= MIN_RELEVANCE_THRESHOLD;
+              });
+              
+              // Log filtered results
+              const filteredCount = memories.length - relevantMemories.length;
+              if (filteredCount > 0) {
+                app.log.debug({ 
+                  userId, 
+                  query,
+                  filteredCount,
+                  remainingCount: relevantMemories.length,
+                  threshold: MIN_RELEVANCE_THRESHOLD,
+                  filteredIds: memories
+                    .filter(m => !relevantMemories.includes(m))
+                    .map(m => ({ id: m.id, score: relevanceScores.get(m.id) || 0, content: m.content.substring(0, 50) }))
+                }, 'Filtered low-relevance memories');
+              }
+              
               // First, filter out incomplete memories
-              const completeMemories = memories.filter(mem => {
+              const completeMemories = relevantMemories.filter(mem => {
                 const content = mem.content.toLowerCase();
                 const attributeMatch = content.match(/my\s+(favorite\s+)?(\w+(?:\s+\w+)?)\s+(?:is|are|was|were)\s+(.+)/);
                 if (attributeMatch) {
@@ -491,18 +559,51 @@ export function registerRoutes(
 
               // For remaining memories, use semantic similarity deduplication
               const finalMemories = deduplicateBySemanticSimilarity(deduplicated, 0.85);
+              
+              // Sort by relevance score (highest first) before limiting
+              const sortedMemories = finalMemories.sort((a, b) => {
+                const scoreA = relevanceScores.get(a.id) || 0;
+                const scoreB = relevanceScores.get(b.id) || 0;
+                if (Math.abs(scoreA - scoreB) > 0.01) {
+                  return scoreB - scoreA; // Higher score first
+                }
+                // Secondary: recency
+                if (a.updatedAt !== b.updatedAt) {
+                  return b.updatedAt - a.updatedAt;
+                }
+                // Tertiary: tier
+                const tierOrder: Record<string, number> = { TIER1: 1, TIER2: 2, TIER3: 3 };
+                const tierA = tierOrder[a.tier || 'TIER3'] || 4;
+                const tierB = tierOrder[b.tier || 'TIER3'] || 4;
+                return tierA - tierB;
+              });
 
-              memories = finalMemories.slice(0, limit);
+              memories = sortedMemories.slice(0, limit);
               
               app.log.debug({ 
                 userId, 
+                query,
                 originalCount: memories.length, 
-                deduplicatedCount: finalMemories.length,
-                finalCount: memories.length 
-              }, 'Smart deduplication completed');
+                afterRelevanceFilter: relevantMemories.length,
+                afterDeduplication: finalMemories.length,
+                finalCount: memories.length,
+                avgRelevanceScore: memories.length > 0 
+                  ? memories.reduce((sum, m) => sum + (relevanceScores.get(m.id) || 0), 0) / memories.length 
+                  : 0
+              }, 'Memory recall post-processing completed');
             } else {
-              // No query - just limit results
-              memories = memories.slice(0, limit);
+              // No query - just limit results (but still prefer recent/high-priority)
+              memories = memories
+                .sort((a, b) => {
+                  // Sort by tier, then recency, then priority
+                  const tierOrder: Record<string, number> = { TIER1: 1, TIER2: 2, TIER3: 3 };
+                  const tierA = tierOrder[a.tier || 'TIER3'] || 4;
+                  const tierB = tierOrder[b.tier || 'TIER3'] || 4;
+                  if (tierA !== tierB) return tierA - tierB;
+                  if (a.updatedAt !== b.updatedAt) return b.updatedAt - a.updatedAt;
+                  return b.priority - a.priority;
+                })
+                .slice(0, limit);
             }
 
             app.log.debug({
@@ -834,33 +935,111 @@ export function registerRoutes(
 
     app.log.info({ userId, threadId, saved, avgScore }, 'Audit complete');
 
-    // Generate and cache conversation summary (background, non-blocking)
+    // ENHANCED: Calculate conversation importance score for better summarization
+    let conversationImportance = 0.5; // Default importance
+    if (db && messages.length > 0) {
+      try {
+        // Calculate importance based on:
+        // 1. Memory count (more memories = more important)
+        const memoryCount = db.prepare(
+          'SELECT COUNT(*) as count FROM memories WHERE userId = ? AND threadId = ? AND deletedAt IS NULL'
+        ).get(userId, threadId) as { count: number } | undefined;
+        const memCount = memoryCount?.count || 0;
+        
+        // 2. TIER1/TIER2 memory presence (explicit saves = important)
+        const tier1Count = db.prepare(
+          'SELECT COUNT(*) as count FROM memories WHERE userId = ? AND threadId = ? AND tier = ? AND deletedAt IS NULL'
+        ).get(userId, threadId, 'TIER1') as { count: number } | undefined;
+        const tier2Count = db.prepare(
+          'SELECT COUNT(*) as count FROM memories WHERE userId = ? AND threadId = ? AND tier = ? AND deletedAt IS NULL'
+        ).get(userId, threadId, 'TIER2') as { count: number } | undefined;
+        const hasTier1Memories = (tier1Count?.count || 0) > 0;
+        const hasTier2Memories = (tier2Count?.count || 0) > 0;
+        
+        // 3. Conversation length (longer = more important)
+        const conversationLength = messages.length;
+        
+        // 4. Recent activity (conversations with recent messages are more important)
+        const lastMessageTime = messages[messages.length - 1]?.timestamp || Date.now();
+        const hoursSinceLastMessage = (Date.now() - lastMessageTime) / (1000 * 60 * 60);
+        const recencyScore = Math.max(0, 1 - (hoursSinceLastMessage / 24)); // Decay over 24 hours
+        
+        // Calculate importance score (0.0 to 1.0)
+        const memoryScore = Math.min(1.0, memCount / 10); // Normalize to 10 memories = max
+        const tierScore = (hasTier1Memories ? 0.4 : 0) + (hasTier2Memories ? 0.2 : 0);
+        const lengthScore = Math.min(1.0, conversationLength / 50); // Normalize to 50 messages = max
+        
+        conversationImportance = (
+          memoryScore * 0.3 +
+          tierScore * 0.3 +
+          lengthScore * 0.2 +
+          recencyScore * 0.2
+        );
+        
+        app.log.debug({ 
+          userId, 
+          threadId, 
+          importance: conversationImportance,
+          memoryCount: memCount,
+          hasTier1: hasTier1Memories,
+          hasTier2: hasTier2Memories,
+          length: conversationLength,
+          recencyHours: hoursSinceLastMessage
+        }, 'Conversation importance calculated');
+      } catch (error: any) {
+        app.log.debug({ error: error.message, threadId }, 'Failed to calculate conversation importance');
+      }
+    }
+
+    // ENHANCED: Generate and cache conversation summary with importance-based updates
     if (gatewayDb && messages.length > 0) {
       try {
-        // Check if summary already exists and is recent (< 1 hour old)
         // CRITICAL: Filter by userId to prevent cross-user data leakage
         const existing = gatewayDb.prepare(
           'SELECT summary, updated_at FROM thread_summaries WHERE thread_id = ? AND user_id = ?'
         ).get(threadId, userId) as { summary: string; updated_at: number } | undefined;
 
-        const oneHourAgo = Math.floor(Date.now() / 1000) - 3600;
-        const needsUpdate = !existing || existing.updated_at < oneHourAgo;
+        // ENHANCED: Dynamic update threshold based on importance
+        // Important conversations (importance > 0.7): Update every 15 minutes
+        // Medium conversations (importance > 0.4): Update every 30 minutes
+        // Normal conversations: Update every 1 hour (original)
+        const now = Math.floor(Date.now() / 1000);
+        let updateThreshold = 3600; // 1 hour default
+        if (conversationImportance > 0.7) {
+          updateThreshold = 900; // 15 minutes for very important
+        } else if (conversationImportance > 0.4) {
+          updateThreshold = 1800; // 30 minutes for moderately important
+        }
+        
+        const thresholdTime = now - updateThreshold;
+        const needsUpdate = !existing || existing.updated_at < thresholdTime;
 
         if (needsUpdate) {
-          // Generate summary in background (don't await)
+          // ENHANCED: Generate summary in background with importance-aware length
           (async () => {
             try {
-              const summary = await generateSummary(messages);
-              const now = Math.floor(Date.now() / 1000);
+              // Important conversations get longer summaries (up to 800 chars)
+              // Normal conversations get standard summaries (500 chars)
+              const maxSummaryLength = conversationImportance > 0.7 ? 800 : 500;
               
-              // Upsert summary in gateway DB (using unified schema with user_id)
+              const summary = await generateSummary(messages);
+              // Truncate to importance-based length
+              const truncatedSummary = summary.substring(0, maxSummaryLength);
+              
+              // Store summary with importance metadata
               gatewayDb.prepare(
                 `INSERT INTO thread_summaries (thread_id, user_id, summary, updated_at)
                  VALUES (?, ?, ?, ?)
                  ON CONFLICT(thread_id) DO UPDATE SET summary = ?, updated_at = ?`
-              ).run(threadId, userId, summary, now, summary, now);
+              ).run(threadId, userId, truncatedSummary, now, truncatedSummary, now);
               
-              app.log.debug({ threadId, summaryLength: summary.length }, 'Conversation summary cached');
+              app.log.debug({ 
+                threadId, 
+                summaryLength: truncatedSummary.length,
+                importance: conversationImportance,
+                maxLength: maxSummaryLength,
+                updateThreshold: updateThreshold / 60 + ' minutes'
+              }, 'Conversation summary cached (enhanced)');
             } catch (error: any) {
               app.log.warn({ error: error.message, threadId }, 'Failed to cache summary');
             }
