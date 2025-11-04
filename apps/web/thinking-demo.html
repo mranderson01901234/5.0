@@ -1,0 +1,568 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thinking Narrator System - Demo</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+    }
+
+    .header {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+    }
+
+    .header h1 {
+      font-size: 32px;
+      color: #1a202c;
+      margin-bottom: 10px;
+    }
+
+    .header p {
+      color: #718096;
+      font-size: 16px;
+    }
+
+    .demo-container {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.1);
+      margin-bottom: 20px;
+    }
+
+    .input-section {
+      margin-bottom: 20px;
+    }
+
+    .input-group {
+      display: flex;
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+
+    input[type="text"] {
+      flex: 1;
+      padding: 15px;
+      font-size: 16px;
+      border: 2px solid #e2e8f0;
+      border-radius: 8px;
+      outline: none;
+      transition: border-color 0.2s;
+    }
+
+    input[type="text"]:focus {
+      border-color: #667eea;
+    }
+
+    button {
+      padding: 15px 30px;
+      font-size: 16px;
+      font-weight: 600;
+      background: #667eea;
+      color: white;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #5568d3;
+    }
+
+    button:disabled {
+      background: #cbd5e0;
+      cursor: not-allowed;
+    }
+
+    .examples {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .example-btn {
+      padding: 8px 16px;
+      font-size: 14px;
+      background: #f7fafc;
+      color: #4a5568;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .example-btn:hover {
+      background: #edf2f7;
+      border-color: #cbd5e0;
+    }
+
+    .thinking-display {
+      background: rgba(102, 126, 234, 0.05);
+      border: 2px solid rgba(102, 126, 234, 0.2);
+      border-radius: 8px;
+      padding: 20px;
+      margin: 20px 0;
+      min-height: 100px;
+    }
+
+    .thinking-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 15px;
+      padding-bottom: 15px;
+      border-bottom: 1px solid rgba(102, 126, 234, 0.1);
+    }
+
+    .thinking-label {
+      font-size: 12px;
+      font-weight: 600;
+      color: #667eea;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    .thinking-category {
+      font-size: 12px;
+      color: #718096;
+      background: #f7fafc;
+      padding: 4px 12px;
+      border-radius: 12px;
+    }
+
+    .thinking-steps {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .thinking-step {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      padding: 8px 0;
+      font-size: 15px;
+      animation: fadeIn 0.3s ease-in;
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(-10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .step-indicator {
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 12px;
+      font-weight: bold;
+    }
+
+    .step-active .step-indicator {
+      background: #667eea;
+      color: white;
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    .step-complete .step-indicator {
+      background: #48bb78;
+      color: white;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    .step-text {
+      flex: 1;
+      color: #2d3748;
+      line-height: 1.6;
+    }
+
+    .thinking-dots {
+      display: inline-block;
+      min-width: 20px;
+    }
+
+    .response-display {
+      background: #f7fafc;
+      border-radius: 8px;
+      padding: 20px;
+      margin-top: 20px;
+      white-space: pre-wrap;
+      line-height: 1.6;
+      color: #2d3748;
+    }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+
+    .stat-card {
+      background: #f7fafc;
+      padding: 15px;
+      border-radius: 8px;
+      border: 1px solid #e2e8f0;
+    }
+
+    .stat-label {
+      font-size: 12px;
+      color: #718096;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 5px;
+    }
+
+    .stat-value {
+      font-size: 24px;
+      font-weight: bold;
+      color: #2d3748;
+    }
+
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🧠 Thinking Narrator System</h1>
+      <p>Client-side contextual thinking generation - Zero API calls, <20ms generation time</p>
+    </div>
+
+    <div class="demo-container">
+      <div class="input-section">
+        <div class="input-group">
+          <input
+            type="text"
+            id="queryInput"
+            placeholder="Try: 'Write a function to sort an array' or 'Explain how React works'..."
+          />
+          <button id="submitBtn">Generate</button>
+        </div>
+
+        <div class="examples">
+          <span style="font-size: 14px; color: #718096; margin-right: 10px;">Examples:</span>
+          <button class="example-btn" data-query="Write a function to reverse a string">Code</button>
+          <button class="example-btn" data-query="Debug this TypeError: Cannot read property of undefined">Debug</button>
+          <button class="example-btn" data-query="Explain how async/await works in JavaScript">Explain</button>
+          <button class="example-btn" data-query="Design a REST API for a blog platform">Design</button>
+          <button class="example-btn" data-query="Optimize this slow database query">Optimize</button>
+        </div>
+      </div>
+
+      <div id="thinkingContainer" class="hidden"></div>
+      <div id="responseContainer" class="hidden"></div>
+
+      <div class="stats">
+        <div class="stat-card">
+          <div class="stat-label">Generation Time</div>
+          <div class="stat-value" id="genTime">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Query Category</div>
+          <div class="stat-value" id="category" style="font-size: 18px;">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Complexity</div>
+          <div class="stat-value" id="complexity" style="font-size: 18px;">—</div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-label">Steps Generated</div>
+          <div class="stat-value" id="stepCount">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="demo-container">
+      <h3 style="margin-bottom: 15px; color: #2d3748;">About This Demo</h3>
+      <p style="line-height: 1.8; color: #4a5568;">
+        This demo showcases a production-ready thinking narrator system that generates contextual "thinking" steps
+        based on user queries. The system uses a hybrid rule-based + lightweight neural approach to classify queries
+        and generate relevant thinking narratives—all running entirely in your browser with zero API calls.
+        <br><br>
+        <strong>Key Features:</strong> 10 query categories, <20ms generation time, <10MB memory footprint,
+        contextual variation, offline-capable.
+      </p>
+    </div>
+  </div>
+
+  <script type="module">
+    // Simplified version of the thinking system for demo purposes
+    // This is a standalone demo - full implementation in src/lib/thinking/
+
+    class SimplifiedThinkingEngine {
+      constructor() {
+        this.patterns = {
+          code: {
+            keywords: ['function', 'class', 'component', 'code', 'write', 'implement'],
+            steps: [
+              'Analyzing code requirements...',
+              'Evaluating implementation approaches...',
+              'Planning code structure...',
+              'Considering edge cases...',
+              'Formulating solution...'
+            ]
+          },
+          debugging: {
+            keywords: ['error', 'bug', 'debug', 'fix', 'problem', 'issue'],
+            steps: [
+              'Analyzing error context...',
+              'Identifying potential causes...',
+              'Tracing execution flow...',
+              'Evaluating solutions...',
+              'Formulating fix...'
+            ]
+          },
+          explanation: {
+            keywords: ['explain', 'what', 'how', 'why', 'describe'],
+            steps: [
+              'Analyzing query focus...',
+              'Organizing key concepts...',
+              'Structuring explanation...',
+              'Preparing clear examples...'
+            ]
+          },
+          design: {
+            keywords: ['design', 'architecture', 'structure', 'api'],
+            steps: [
+              'Analyzing design requirements...',
+              'Exploring architectural patterns...',
+              'Evaluating structural approaches...',
+              'Planning system organization...',
+              'Finalizing design...'
+            ]
+          },
+          optimization: {
+            keywords: ['optimize', 'improve', 'performance', 'faster', 'slow'],
+            steps: [
+              'Analyzing performance requirements...',
+              'Identifying bottlenecks...',
+              'Evaluating optimization strategies...',
+              'Planning improvements...',
+              'Finalizing approach...'
+            ]
+          },
+          general: {
+            keywords: [],
+            steps: [
+              'Analyzing request...',
+              'Processing information...',
+              'Structuring response...',
+              'Finalizing output...'
+            ]
+          }
+        };
+      }
+
+      classify(query) {
+        const normalized = query.toLowerCase();
+        let bestCategory = 'general';
+        let maxScore = 0;
+
+        for (const [category, data] of Object.entries(this.patterns)) {
+          if (category === 'general') continue;
+
+          const score = data.keywords.filter(kw => normalized.includes(kw)).length;
+          if (score > maxScore) {
+            maxScore = score;
+            bestCategory = category;
+          }
+        }
+
+        const complexity = query.split(/\s+/).length < 8 ? 'simple' :
+                          query.split(/\s+/).length > 20 ? 'complex' : 'moderate';
+
+        return { category: bestCategory, complexity };
+      }
+
+      generateThinking(query) {
+        const context = this.classify(query);
+        const steps = this.patterns[context.category].steps;
+
+        const duration = context.complexity === 'simple' ? 1500 :
+                        context.complexity === 'moderate' ? 3000 : 5000;
+
+        return {
+          steps: steps.map((text, i) => ({
+            text,
+            duration: duration / steps.length
+          })),
+          context,
+          totalDuration: duration
+        };
+      }
+    }
+
+    // Initialize engine
+    const engine = new SimplifiedThinkingEngine();
+
+    // DOM elements
+    const queryInput = document.getElementById('queryInput');
+    const submitBtn = document.getElementById('submitBtn');
+    const thinkingContainer = document.getElementById('thinkingContainer');
+    const responseContainer = document.getElementById('responseContainer');
+
+    // Stats elements
+    const genTime = document.getElementById('genTime');
+    const category = document.getElementById('category');
+    const complexity = document.getElementById('complexity');
+    const stepCount = document.getElementById('stepCount');
+
+    // Current thinking state
+    let currentTimeout = null;
+
+    // Generate thinking
+    async function generateThinking(query) {
+      if (!query.trim()) return;
+
+      // Clear previous
+      if (currentTimeout) clearTimeout(currentTimeout);
+      thinkingContainer.innerHTML = '';
+      responseContainer.classList.add('hidden');
+      submitBtn.disabled = true;
+
+      // Measure generation time
+      const startTime = performance.now();
+      const stream = engine.generateThinking(query);
+      const generationTime = performance.now() - startTime;
+
+      // Update stats
+      genTime.textContent = `${generationTime.toFixed(2)}ms`;
+      category.textContent = stream.context.category;
+      complexity.textContent = stream.context.complexity;
+      stepCount.textContent = stream.steps.length;
+
+      // Show thinking container
+      thinkingContainer.classList.remove('hidden');
+      thinkingContainer.innerHTML = `
+        <div class="thinking-display">
+          <div class="thinking-header">
+            <span class="thinking-label">Thinking</span>
+            <span class="thinking-category">${stream.context.category}</span>
+          </div>
+          <div class="thinking-steps" id="stepsContainer"></div>
+        </div>
+      `;
+
+      const stepsContainer = document.getElementById('stepsContainer');
+
+      // Animate steps
+      for (let i = 0; i < stream.steps.length; i++) {
+        const step = stream.steps[i];
+        const isLast = i === stream.steps.length - 1;
+
+        const stepEl = document.createElement('div');
+        stepEl.className = 'thinking-step step-active';
+        stepEl.innerHTML = `
+          <div class="step-indicator">•</div>
+          <div class="step-text">
+            ${step.text.replace('...', '')}<span class="thinking-dots" id="dots-${i}"></span>
+          </div>
+        `;
+        stepsContainer.appendChild(stepEl);
+
+        // Animate dots
+        let dotCount = 0;
+        const dotsEl = document.getElementById(`dots-${i}`);
+        const dotsInterval = setInterval(() => {
+          dotCount = (dotCount + 1) % 4;
+          dotsEl.textContent = '.'.repeat(dotCount);
+        }, 400);
+
+        // Wait for step duration
+        await new Promise(resolve => {
+          currentTimeout = setTimeout(resolve, step.duration);
+        });
+
+        // Mark as complete
+        clearInterval(dotsInterval);
+        stepEl.className = 'thinking-step step-complete';
+        stepEl.querySelector('.step-indicator').textContent = '✓';
+        dotsEl.textContent = '...';
+
+        if (isLast) {
+          // Show response
+          setTimeout(() => {
+            responseContainer.classList.remove('hidden');
+            responseContainer.innerHTML = `
+              <div class="response-display">
+                <strong>Response to:</strong> "${query}"
+
+                This is where your actual LLM response would appear.
+
+                The thinking system classified your query as <strong>${stream.context.category}</strong>
+                with <strong>${stream.context.complexity}</strong> complexity, and generated
+                <strong>${stream.steps.length}</strong> contextual thinking steps.
+
+                Total generation time: <strong>${generationTime.toFixed(2)}ms</strong>
+              </div>
+            `;
+            submitBtn.disabled = false;
+          }, 500);
+        }
+      }
+    }
+
+    // Event listeners
+    submitBtn.addEventListener('click', () => {
+      generateThinking(queryInput.value);
+    });
+
+    queryInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') {
+        generateThinking(queryInput.value);
+      }
+    });
+
+    document.querySelectorAll('.example-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        queryInput.value = btn.dataset.query;
+        generateThinking(btn.dataset.query);
+      });
+    });
+
+    // Auto-run example on load
+    setTimeout(() => {
+      queryInput.value = "Write a function to sort an array";
+      generateThinking(queryInput.value);
+    }, 500);
+  </script>
+</body>
+</html>

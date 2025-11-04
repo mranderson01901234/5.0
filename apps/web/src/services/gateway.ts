@@ -113,19 +113,19 @@ export async function streamChat(payload:{
         const dataLine = lines.find(l=>l.startsWith("data:"));
         const dataStr = dataLine ? dataLine.slice(5).trim() : "";
         
-        // Debug logging for research events
-        if (mappedEv === "research_summary" || mappedEv === "sources" || mappedEv === "research_thinking") {
-          log.debug('[gateway.ts] SSE event received:', { 
-            event: mappedEv, 
+        // Debug logging for research and thinking events
+        if (mappedEv === "research_summary" || mappedEv === "sources" || mappedEv === "research_thinking" || mappedEv === "thinking_step") {
+          log.debug('[gateway.ts] SSE event received:', {
+            event: mappedEv,
             rawEvent: ev,
             dataStr: dataStr.substring(0, 200),
-            hasData: !!dataStr 
+            hasData: !!dataStr
           });
         }
         
         // Skip empty data (like heartbeat events), but include error events
-        // IMPORTANT: Don't skip research_summary or sources even if data is empty initially
-        if(!dataStr && mappedEv !== "error" && mappedEv !== "research_summary" && mappedEv !== "sources" && mappedEv !== "research_thinking") continue;
+        // IMPORTANT: Don't skip research_summary, sources, thinking_step even if data is empty initially
+        if(!dataStr && mappedEv !== "error" && mappedEv !== "research_summary" && mappedEv !== "sources" && mappedEv !== "research_thinking" && mappedEv !== "thinking_step") continue;
         
         let data;
         try {

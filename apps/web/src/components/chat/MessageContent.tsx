@@ -79,7 +79,15 @@ const MessageContentBase: React.FC<Props> = ({ content, isUser }) => {
     // Simple markdown-like rendering
     const renderContent = (rawText: string) => {
       // Remove all ** markdown bold markers from the entire content
-      const text = rawText.replace(/\*\*/g, '');
+      let text = rawText.replace(/\*\*/g, '');
+
+      // Remove ugly L. bullets and random numbers, but convert to proper - bullets
+      // Handle bullets with optional leading whitespace
+      text = text.replace(/^\s*L\.\s+/gm, '- ');
+      text = text.replace(/^\s*\d+\.\s+/gm, '- ');
+      // Remove Unicode box characters completely
+      text = text.replace(/^\s*[└├│]\s*\.?\s*/gm, '- ');
+
       // REMOVED: Don't merge lines automatically - preserve user's original formatting
       // Users pasting math problems want their newlines preserved
       const lines = text.split('\n');
@@ -87,7 +95,7 @@ const MessageContentBase: React.FC<Props> = ({ content, isUser }) => {
       let i = 0;
 
       // Helper function to detect code blocks
-      const detectCodeBlock = (startIndex: number): { endIndex: number; language: string; code: string } | null => {
+      const detectCodeBlock = (startIndex: number): { endIndex: number; language: string; code: string; isStreaming: boolean } | null => {
         const line = lines[startIndex];
         const codeBlockMatch = line.match(/^```(\w+)?$/);
         
@@ -100,14 +108,15 @@ const MessageContentBase: React.FC<Props> = ({ content, isUser }) => {
         // Find the closing ```
         while (endIndex < lines.length) {
           if (lines[endIndex].trim() === '```') {
-            return { endIndex, language, code: codeLines.join('\n') };
+            return { endIndex, language, code: codeLines.join('\n'), isStreaming: false };
           }
           codeLines.push(lines[endIndex]);
           endIndex++;
         }
         
-        // No closing found, treat as regular content
-        return null;
+        // No closing found during streaming - still render code block with current content
+        // This allows code to appear inside the code block while streaming
+        return { endIndex: lines.length, language, code: codeLines.join('\n'), isStreaming: true };
       };
 
       // Function to render text with linkification
@@ -116,6 +125,31 @@ const MessageContentBase: React.FC<Props> = ({ content, isUser }) => {
         const safeHtml = renderSafeMessage(text);
         // Use dangerouslySetInnerHTML for safe HTML rendering (already sanitized)
         return <span dangerouslySetInnerHTML={{ __html: safeHtml }} />;
+      };
+
+      // Function to render text with highlighting for key terms
+      const renderWithHighlighting = (text: string): React.ReactNode => {
+        // Pattern to match key terms at the start (component names, technical terms)
+        // Matches: "ComponentName:", "term:", etc.
+        const keyTermPattern = /^([A-Z][a-zA-Z0-9_\s]*|[a-z][a-zA-Z0-9_\s]*):(\s)/;
+        const match = text.match(keyTermPattern);
+
+        if (match) {
+          const keyTerm = match[1];
+          const separator = match[2];
+          const restText = text.slice(match[0].length);
+
+          return (
+            <>
+              <span className="font-bold" style={{ color: 'inherit' }}>{keyTerm}:</span>
+              <span>{separator}</span>
+              <span dangerouslySetInnerHTML={{ __html: renderSafeMessage(restText) }} />
+            </>
+          );
+        }
+
+        // No key term found, render normally with linkification
+        return <span dangerouslySetInnerHTML={{ __html: renderSafeMessage(text) }} />;
       };
 
       while (i < lines.length) {
@@ -129,9 +163,10 @@ const MessageContentBase: React.FC<Props> = ({ content, isUser }) => {
               key={`code-${i}`} 
               code={codeBlock.code} 
               language={codeBlock.language}
+              isStreaming={codeBlock.isStreaming}
             />
           );
-          i = codeBlock.endIndex + 1; // Skip past the closing ```
+          i = codeBlock.endIndex + 1; // Skip past the closing ``` (or end of content if streaming)
           continue;
         }
 
@@ -167,43 +202,62 @@ const MessageContentBase: React.FC<Props> = ({ content, isUser }) => {
         else if (line.trim() === '---') {
           elements.push(<hr key={`hr-${i}`} className="my-6 border-white/15" />);
         }
-        // Bullet points
-        else if (line.startsWith('- ') || line.startsWith('* ')) {
+        // Bullet points - also handle Unicode box drawing characters and numbered prefixes
+        else if (line.startsWith('- ') || line.startsWith('* ') || line.match(/^[└├│•▪▫◦‣⁃]\s*\.?\s*/) || line.match(/^\d+\.\s+[└├│]/)) {
           const listItems: string[] = [];
           const listStartIdx = i;
-          while (i < lines.length && (lines[i].startsWith('- ') || lines[i].startsWith('* '))) {
-            listItems.push(lines[i].slice(2));
+          while (i < lines.length) {
+            const currentLine = lines[i];
+            if (!currentLine || !(currentLine.startsWith('- ') || currentLine.startsWith('* ') || currentLine.match(/^[└├│•▪▫◦‣⁃]\s*\.?\s*/) || currentLine.match(/^\d+\.\s+[└├│]/))) {
+              break;
+            }
+            // Remove the bullet marker (-, *, Unicode box chars, or numbered prefixes)
+            let itemText = currentLine;
+            if (itemText.startsWith('- ') || itemText.startsWith('* ')) {
+              itemText = itemText.slice(2);
+            } else if (itemText.match(/^[└├│•▪▫◦‣⁃]\s*\.?\s*/)) {
+              // Remove box drawing char and optional dot/space
+              itemText = itemText.replace(/^[└├│•▪▫◦‣⁃]\s*\.?\s*/, '');
+            } else if (itemText.match(/^\d+\.\s+[└├│]/)) {
+              // Remove numbered prefix like "1. └"
+              itemText = itemText.replace(/^\d+\.\s+[└├│]\s*\.?\s*/, '');
+            }
+            listItems.push(itemText);
             i++;
           }
           elements.push(
-            <ul key={`list-${listStartIdx}`} className="list-disc list-outside ml-5 my-3 space-y-1">
+            <ul key={`list-${listStartIdx}`} className="list-disc list-outside ml-5 my-3 space-y-2">
               {listItems.map((item, idx) => (
-                <li key={`list-${listStartIdx}-item-${idx}`}>
-                  {renderWithKeywords(item.replace(/\*\*/g, ''))}
+                <li key={`list-${listStartIdx}-item-${idx}`} className="pl-2">
+                  {renderWithHighlighting(item.replace(/\*\*/g, ''))}
                 </li>
               ))}
             </ul>
           );
           continue;
         }
-        // Numbered lists
+        // Numbered lists (but not "L." which is a letter, not a number)
         else if (/^\d+\.\s/.test(line)) {
           const listItems: string[] = [];
           const listStartIdx = i;
-          while (i < lines.length && /^\d+\.\s/.test(lines[i])) {
-            listItems.push(lines[i].replace(/^\d+\.\s/, ''));
+          while (i < lines.length) {
+            const currentLine = lines[i];
+            if (!currentLine || !/^\d+\.\s/.test(currentLine)) {
+              break;
+            }
+            listItems.push(currentLine.replace(/^\d+\.\s/, ''));
             i++;
           }
           elements.push(
-            <ol 
-              key={`numlist-${listStartIdx}`} 
-              className="list-decimal list-outside ml-5 my-3 space-y-1"
+            <ol
+              key={`numlist-${listStartIdx}`}
+              className="list-decimal list-outside ml-5 my-3 space-y-2"
               start={1}
               style={{ listStyleType: 'decimal', counterReset: 'none' }}
             >
               {listItems.map((item, idx) => (
-                <li key={`numlist-${listStartIdx}-item-${idx}`}>
-                  {renderWithKeywords(item.replace(/\*\*/g, ''))}
+                <li key={`numlist-${listStartIdx}-item-${idx}`} className="pl-2">
+                  {renderWithHighlighting(item.replace(/\*\*/g, ''))}
                 </li>
               ))}
             </ol>

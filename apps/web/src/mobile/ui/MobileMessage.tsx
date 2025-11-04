@@ -6,3 +6,4 @@ export const MobileMessage: React.FC<{ msg: MobileMsg }> = ({ msg }) => {
   return <div className={cls}>{msg.content}</div>;
 };
 
+

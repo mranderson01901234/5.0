@@ -32,6 +32,37 @@
 body {
   @apply bg-[#0f0f0f] text-white/95 antialiased;
   font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
+  position: relative;
+}
+
+/* Semi-transparent overlay to slightly lighten the background */
+body::before {
+  content: '';
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.03);
+  pointer-events: none;
+  z-index: -1;
+}
+
+/* Footer overlay to lighten background behind chat input box */
+.footer-overlay {
+  position: relative;
+}
+
+.footer-overlay::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.03);
+  pointer-events: none;
+  z-index: 0;
 }
 
 .glass {
@@ -82,8 +113,8 @@ textarea.math-input::placeholder {
 .message-content {
   font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
   font-weight: 500;
-  font-size: 30px;
-  color: rgba(255, 250, 200, 0.95);
+  font-size: 24px;
+  color: rgba(236, 236, 241, 0.95);
   line-height: 1.6;
   letter-spacing: normal;
   scroll-margin: 5rem; /* scroll-m-20 equivalent */
@@ -99,8 +130,8 @@ textarea.math-input::placeholder {
 .message-content-user {
   font-family: 'Courier New', 'Monaco', 'Consolas', monospace !important;
   font-weight: 500; /* medium weight */
-  font-size: 24px !important;
-  color: rgba(236, 236, 241, 0.95);
+  font-size: 21px !important;
+  color: rgba(255, 254, 210, 0.95);
   line-height: 1.75;
   letter-spacing: normal;
   overflow: visible;
@@ -406,5 +437,48 @@ textarea.math-input::placeholder {
 .skip-link:focus {
   top: 0;
   outline: 2px solid blue;
+}
+
+/* Chat layout with fixed user message and scrollable history */
+.chat-container {
+  position: relative;
+}
+
+/* Fixed user message - stays at top-right position */
+.fixed-user-message {
+  position: sticky;
+  top: 80px; /* Below TopBar */
+  z-index: 10;
+  background: transparent;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  margin-bottom: 24px;
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+/* Scrollable history container - positioned above user message, scrolls upward */
+.chat-history-scroll {
+  /* History appears above user message in normal flow */
+  margin-bottom: 24px;
+  padding-bottom: 16px;
+  /* Smooth scrolling */
+  scroll-behavior: smooth;
+}
+
+/* Message action icons - monochrome, bottom right */
+.message-actions {
+  opacity: 1;
+}
+
+.message-actions button {
+  color: rgba(255, 255, 255, 0.5);
+  transition: all 0.2s ease;
+}
+
+.message-actions button:hover {
+  color: rgba(255, 255, 255, 0.8);
+  background-color: rgba(255, 255, 255, 0.1);
 }
 

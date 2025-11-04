@@ -66,15 +66,107 @@ const MessageListBase: React.FC = () => {
     }
   }, []);
 
+  // Position new user messages at 75px anchor
   useEffect(() => {
-    if (containerRef.current) {
-      // Auto-scroll on new messages
-      const scrollContainer = containerRef.current.closest('.overflow-y-auto');
-      if (scrollContainer) {
-        (scrollContainer as HTMLElement).scrollTop = scrollContainer.scrollHeight;
+    if (!containerRef.current) return;
+    
+    // Find the actual scrollable container - try multiple methods
+    let scrollContainer = containerRef.current.closest('.overflow-y-auto') as HTMLElement;
+    
+    // If that doesn't work or isn't scrollable, try finding the chat-container
+    if (!scrollContainer || scrollContainer.scrollHeight <= scrollContainer.clientHeight) {
+      scrollContainer = containerRef.current.closest('.chat-container') as HTMLElement;
+    }
+    
+    // If still not found, try window
+    if (!scrollContainer || (scrollContainer.scrollHeight <= scrollContainer.clientHeight && scrollContainer !== document.documentElement)) {
+      // Find parent with actual scroll
+      let parent = containerRef.current.parentElement;
+      while (parent && parent !== document.body) {
+        if (parent.scrollHeight > parent.clientHeight) {
+          scrollContainer = parent;
+          break;
+        }
+        parent = parent.parentElement;
       }
     }
-  }, [items.length, items[items.length - 1]?.content]);
+    
+    if (!scrollContainer) return;
+    
+    // Find the last USER message (not just last item, since assistant is added right after)
+    const lastUserMessage = [...items].reverse().find(item => item.role === 'user');
+    if (!lastUserMessage) {
+      // If no user message, scroll to bottom as before
+      scrollContainer.scrollTop = scrollContainer.scrollHeight;
+      return;
+    }
+
+    // Track if we've already positioned this message to prevent loops
+    const messageId = lastUserMessage.id;
+    const positionedKey = `positioned-${messageId}`;
+    if (sessionStorage.getItem(positionedKey)) {
+      return; // Already positioned this message
+    }
+
+    // Wait for message to render and layout to complete
+    const frameId = requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const messageElement = containerRef.current?.querySelector(`article[data-id="${messageId}"]`) as HTMLElement;
+        if (!messageElement) return;
+
+        const messageRect = messageElement.getBoundingClientRect();
+        const containerRect = scrollContainer.getBoundingClientRect();
+        
+        // Wait for layout, then scroll
+        setTimeout(() => {
+          const messageRect = messageElement.getBoundingClientRect();
+          const currentTop = messageRect.top;
+          const targetTop = 75;
+          
+          // If already at target, skip
+          if (Math.abs(currentTop - targetTop) < 5) {
+            sessionStorage.setItem(positionedKey, 'true');
+            return;
+          }
+          
+          // FORCE SCROLL: Try multiple methods
+          const scrollAmount = currentTop - targetTop;
+          
+          // Method 1: Direct scrollTop assignment
+          scrollContainer.scrollTop = scrollContainer.scrollTop + scrollAmount;
+          
+          // Method 2: scrollTo
+          scrollContainer.scrollTo(0, scrollContainer.scrollTop + scrollAmount);
+          
+          // Method 3: scrollBy
+          scrollContainer.scrollBy(0, scrollAmount);
+          
+          // Method 4: If container won't scroll, try window
+          if (scrollContainer.scrollTop === 0 && Math.abs(scrollAmount) > 10) {
+            window.scrollBy(0, scrollAmount);
+          }
+          
+          // Verify immediately
+          requestAnimationFrame(() => {
+            const verifyRect = messageElement.getBoundingClientRect();
+            const newTop = verifyRect.top;
+            const stillOff = newTop - targetTop;
+            
+            // If still off, try one more adjustment
+            if (Math.abs(stillOff) > 5) {
+              scrollContainer.scrollTop = scrollContainer.scrollTop + stillOff;
+              window.scrollBy(0, stillOff);
+            }
+            
+            sessionStorage.setItem(positionedKey, 'true');
+            setTimeout(() => sessionStorage.removeItem(positionedKey), 1000);
+          });
+        }, 100);
+      });
+    });
+
+    return () => cancelAnimationFrame(frameId);
+  }, [items.length, items[items.length - 1]?.id]);
 
   if (items.length === 0) return null;
 

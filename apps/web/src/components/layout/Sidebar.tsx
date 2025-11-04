@@ -29,7 +29,6 @@ const SidebarBase: React.FC = () => {
   const newConversation = useChatStore(s => s.newConversation);
   const switchConversation = useChatStore(s => s.switchConversation);
   const deleteConversation = useChatStore(s => s.deleteConversation);
-  const setView = useChatStore(s => s.setView);
   const { getToken } = useAuth();
   const conversationsListRef = useRef<HTMLDivElement>(null);
   
@@ -89,25 +88,11 @@ const SidebarBase: React.FC = () => {
         className={cn(
           "group fixed left-0 top-0 h-screen border-r border-white/10 z-20",
           "glass transition-[width] duration-300 ease-in-out",
-          expanded ? "w-[280px]" : "w-[48px]"
+          expanded ? "w-[280px]" : "w-[64px]"
         )}
         aria-label="Primary navigation"
       >
         <div className="flex h-full flex-col">
-          {/* Logo */}
-          <button 
-            onClick={() => setView('chat')}
-            className="flex items-center gap-2 px-3 py-3 border-b border-white/10 w-full hover:bg-white/5 transition-colors"
-          >
-            <div className="h-6 w-6 rounded-lg bg-white/5 border border-white/10 flex items-center justify-center flex-shrink-0">
-              <span className="text-xs font-bold text-white/90">O</span>
-            </div>
-            <span className={cn(
-              "text-sm font-medium tracking-wide text-white/95 transition-opacity duration-300",
-              expanded ? "opacity-100" : "opacity-0"
-            )}>operastudio</span>
-          </button>
-
           {/* New Chat Button */}
           <div className={cn(
             "flex items-center py-3 transition-all",
@@ -127,8 +112,8 @@ const SidebarBase: React.FC = () => {
                 expanded ? "opacity-0" : "opacity-100"
               )}/>
               <span className={cn(
-                "text-sm transition-all duration-300",
-                expanded ? "opacity-100" : "opacity-0 w-0 overflow-hidden"
+                "transition-all duration-300",
+                expanded ? "opacity-100 text-base" : "opacity-0 w-0 overflow-hidden text-sm"
               )}>New Chat</span>
             </button>
           </div>
@@ -165,7 +150,7 @@ const SidebarBase: React.FC = () => {
                           )}
                           aria-label={`Open conversation: ${conv.title}`}
                         >
-                          <span className="text-sm truncate">{conv.title}</span>
+                          <span className="text-base truncate">{conv.title}</span>
                         </button>
                         <button
                           onClick={(e) => {
@@ -204,8 +189,8 @@ const SidebarBase: React.FC = () => {
             >
               <BarChart3 className="h-5 w-5 flex-shrink-0"/>
               <span className={cn(
-                "text-sm transition-opacity duration-300",
-                expanded ? "opacity-100" : "opacity-0"
+                "transition-opacity duration-300",
+                expanded ? "opacity-100 text-base" : "opacity-0 text-sm"
               )}>Dashboard</span>
             </button>
 
@@ -219,8 +204,8 @@ const SidebarBase: React.FC = () => {
             >
               <Settings className="h-5 w-5 flex-shrink-0"/>
               <span className={cn(
-                "text-sm transition-opacity duration-300",
-                expanded ? "opacity-100" : "opacity-0"
+                "transition-opacity duration-300",
+                expanded ? "opacity-100 text-base" : "opacity-0 text-sm"
               )}>Settings</span>
             </button>
           </div>

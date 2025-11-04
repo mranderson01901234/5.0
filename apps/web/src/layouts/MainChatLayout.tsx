@@ -93,7 +93,12 @@ export default function MainChatLayout() {
         const token = await getToken();
         const messages = await getConversationMessages(currentThreadId, token || undefined);
         if (mounted) {
-          loadMessages(currentThreadId, messages);
+          // Double-check that messages still haven't been loaded (race condition protection)
+          // This prevents duplicate loads if this effect runs multiple times or concurrently
+          const currentConv = useChatStore.getState().conversations.find(c => c.id === currentThreadId);
+          if (currentConv && currentConv.messages.length === 0 && !currentConv.isLocal) {
+            loadMessages(currentThreadId, messages);
+          }
         }
       } catch (error: any) {
         // If conversation doesn't exist (404), silently clear it - don't log as error
@@ -139,7 +144,7 @@ export default function MainChatLayout() {
         ) : !hasMessages ? (
           /* Welcome message when no messages */
           <div className="flex-1 flex items-center justify-center px-4">
-            <div className="w-full max-w-3xl">
+            <div className="w-full max-w-[1024px]">
               <div className="mb-8 text-center">
                 <h1 className="text-3xl font-semibold text-white/90 mb-2">
                   What can I help with?
@@ -153,8 +158,18 @@ export default function MainChatLayout() {
           </div>
         ) : (
           /* Chat view with messages */
-          <div className="flex-1 overflow-y-auto pb-[100px]">
-            <div className="max-w-[926px] mx-auto px-4 py-8">
+          <div className="flex-1 overflow-y-auto chat-container relative">
+            {/* Fixed placeholder at 75px for next user message */}
+            <div 
+              className="fixed left-[48px] right-0 z-0 pointer-events-none"
+              style={{ top: '75px' }}
+              id="user-message-anchor"
+            >
+              <div className="max-w-[1024px] mx-auto px-4">
+                {/* This is the anchor point where new user messages will appear */}
+              </div>
+            </div>
+            <div className="max-w-[1024px] mx-auto px-4 pt-[75px] pb-[60px]">
               <ErrorBoundary
                 FallbackComponent={MessageListFallback as any}
                 resetKeys={[currentThreadId ?? 'default']}
@@ -169,16 +184,11 @@ export default function MainChatLayout() {
         )}
         {/* Footer input - only visible when messages exist and in chat view */}
         {hasMessages && currentView === 'chat' && (
-          <>
-            {/* Hidden divider - functional but invisible */}
-            <div className="h-[1px] bg-transparent border-t border-transparent" aria-hidden="true" />
-            {/* Sticky input box */}
-            <div className="sticky bottom-0 z-10 bg-[#0f0f0f]/95 backdrop-blur-sm border-t border-transparent">
-              <div className="max-w-[926px] mx-auto px-4 py-4">
-                <CenterComposer/>
-              </div>
+          <div className="sticky bottom-0 z-10">
+            <div className="max-w-[1024px] mx-auto px-4 py-4">
+              <CenterComposer/>
             </div>
-          </>
+          </div>
         )}
       </main>
     </div>

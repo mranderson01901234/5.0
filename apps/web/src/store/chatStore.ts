@@ -1,10 +1,16 @@
 import { create } from "zustand";
 
-type Msg = { 
-  id:string; 
-  role:"user"|"assistant"|"system"; 
+type Msg = {
+  id:string;
+  role:"user"|"assistant"|"system";
   content:string;
   sources?: Array<{ title: string; host: string; url?: string; date?: string }>;
+};
+
+type ThinkingStep = {
+  id: string;
+  content: string;
+  timestamp: number;
 };
 
 type Conversation = {
@@ -26,8 +32,9 @@ type State = {
   ttfbMs?: number;
   researchThinking?: boolean;
   researchSummary?: string;
+  thinkingSteps: ThinkingStep[];
   currentView: View;
-  
+
   // Actions
   add(m:Msg):void;
   patchAssistant(text:string, sources?: Array<{ title: string; host: string; url?: string; date?: string }>):void;
@@ -36,7 +43,10 @@ type State = {
   setTTFB(ms?:number):void;
   setResearchThinking(thinking:boolean):void;
   setResearchSummary(summary?:string):void;
-  start():void; 
+  addThinkingStep(content: string):void;
+  updateLastThinkingStep(content: string):void;
+  clearThinkingSteps():void;
+  start():void;
   end():void;
   newConversation():void;
   switchConversation(threadId:string):void;
@@ -51,6 +61,7 @@ export const useChatStore = create<State>((set)=>({
   currentThreadId: "",
   streaming: false,
   activeStreams: 0,
+  thinkingSteps: [],
   currentView: 'chat',
   
   add: (m) => set((s) => {
@@ -118,12 +129,28 @@ export const useChatStore = create<State>((set)=>({
   setTTFB: (ms) => set(ms !== undefined ? { ttfbMs: ms } : {}),
   setResearchThinking: (thinking) => set({ researchThinking: thinking }),
   setResearchSummary: (summary) => set(summary !== undefined ? { researchSummary: summary } : {}),
-  
+
+  addThinkingStep: (content) => set((s) => ({
+    thinkingSteps: [...s.thinkingSteps, { id: `step-${Date.now()}`, content, timestamp: Date.now() }]
+  })),
+
+  updateLastThinkingStep: (content) => set((s) => {
+    if (s.thinkingSteps.length === 0) return s;
+    const steps = [...s.thinkingSteps];
+    const lastStep = steps[steps.length - 1];
+    if (!lastStep) return s;
+    steps[steps.length - 1] = { id: lastStep.id, content, timestamp: lastStep.timestamp };
+    return { thinkingSteps: steps };
+  }),
+
+  clearThinkingSteps: () => set({ thinkingSteps: [] }),
+
   start: () => set((s) => ({ streaming: true, activeStreams: s.activeStreams + 1 })),
-  end: () => set((s) => ({ 
-    streaming: false, 
+  end: () => set((s) => ({
+    streaming: false,
     activeStreams: Math.max(0, s.activeStreams - 1),
-    researchThinking: false
+    researchThinking: false,
+    thinkingSteps: []
   })),
   
   newConversation: () => {

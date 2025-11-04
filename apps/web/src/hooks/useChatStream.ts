@@ -5,6 +5,7 @@ import { useAuth } from "@clerk/clerk-react";
 import { handleApiError } from '@/utils/handleApiError';
 import { log } from '@/utils/logger';
 import type { ApiMessage } from '@/types/api';
+import { getThinkingEngine } from '@/lib/thinking/ThinkingEngine';
 
 export type StreamEvent =
   | { type: 'open' }
@@ -16,7 +17,8 @@ export type StreamEvent =
   | { type: 'research_thinking' }
   | { type: 'ingestion_context'; data?: { items?: unknown[] } }
   | { type: 'research_summary'; data: string | { summary?: string; text?: string } | null }
-  | { type: 'sources'; data: Array<{ title: string; host: string; url?: string; date?: string }> | null };
+  | { type: 'sources'; data: Array<{ title: string; host: string; url?: string; date?: string }> | null }
+  | { type: 'thinking_step'; data: string | { content?: string; text?: string } };
 
 function generateTitle(msg: string): string {
   if(!msg.trim()) return "New Chat";
@@ -84,11 +86,35 @@ export function useChatStream(){
       state.start();
       const t0 = performance.now();
       state.setTTFB(undefined);
-      
-      log.info('[useChatStream] Started stream', { 
-        threadId: newThreadId, 
+
+      // Generate contextual thinking steps
+      const thinkingEngine = getThinkingEngine();
+      const thinkingStream = thinkingEngine.generateThinking(text);
+
+      // Add thinking steps progressively
+      let thinkingStepIndex = 0;
+      const addThinkingSteps = () => {
+        if (thinkingStepIndex < thinkingStream.steps.length) {
+          const step = thinkingStream.steps[thinkingStepIndex];
+          state.addThinkingStep(step.text);
+          thinkingStepIndex++;
+
+          // Schedule next step
+          if (thinkingStepIndex < thinkingStream.steps.length) {
+            setTimeout(addThinkingSteps, step.duration);
+          }
+        }
+      };
+
+      // Start showing thinking steps immediately
+      setTimeout(addThinkingSteps, 100);
+
+      log.info('[useChatStream] Started stream', {
+        threadId: newThreadId,
         assistantId: assistant.id,
-        userMessage: text.substring(0, 50)
+        userMessage: text.substring(0, 50),
+        thinkingCategory: thinkingStream.context.category,
+        thinkingSteps: thinkingStream.steps.length
       });
       try {
         const token = await getToken();
@@ -99,6 +125,9 @@ export function useChatStream(){
         let hasResearchSummary = false;
         
         for await (const {ev,data} of stream){
+          // Debug: log all events
+          log.debug('[useChatStream] Stream event:', { ev, dataPreview: typeof data === 'string' ? data.substring(0, 50) : data });
+
           if(ev==="preface"){
             if(performance.now()-t0>400 && !gotPrimary){ 
               const text = typeof data === 'string' ? data : (data?.text || "Working on it…");
@@ -137,6 +166,11 @@ export function useChatStream(){
             }
             
             if (summary && summary.trim().length > 0) {
+              // Convert ugly bullets to proper - bullets (with optional leading whitespace)
+              summary = summary.replace(/^\s*L\.\s+/gm, '- ');
+              summary = summary.replace(/^\s*\d+\.\s+/gm, '- ');
+              summary = summary.replace(/^\s*[└├│]\s*\.?\s*/gm, '- ');
+
               log.debug('[useChatStream] Injecting research summary:', summary.substring(0, 100));
               const currentMsgs = useChatStore.getState().conversations.find(c => c.id === newThreadId)?.messages || [];
               const lastMsg = currentMsgs[currentMsgs.length - 1];
@@ -170,14 +204,20 @@ export function useChatStream(){
             }
             const currentMsgs = useChatStore.getState().conversations.find(c => c.id === newThreadId)?.messages || [];
             const lastMsg = currentMsgs[currentMsgs.length - 1];
-            const deltaText = typeof data === 'string' ? data : (data?.text || data || "");
+            let deltaText = typeof data === 'string' ? data : (data?.text || data || "");
+
+            // Convert ugly bullets (L., numbers, box chars) to proper - bullets (with optional leading whitespace)
+            deltaText = deltaText.replace(/^\s*L\.\s+/gm, '- ');
+            deltaText = deltaText.replace(/^\s*\d+\.\s+/gm, '- ');
+            deltaText = deltaText.replace(/^\s*[└├│]\s*\.?\s*/gm, '- ');
+
             const currentContent = lastMsg?.content || "";
-            
+
             // Append delta naturally - no hard separators needed
             // If there's existing content (from web search or ingestion context), the LLM should continue naturally
             // or we append with a simple newline for natural flow
             const separator = (hasResearchSummary && currentContent && currentContent.trim()) ? "\n\n" : "";
-            
+
             // Simple delta append - all formatting comes from LLM
             state.patchAssistant(currentContent + separator + deltaText);
             
@@ -213,12 +253,39 @@ export function useChatStream(){
             break;
           } else if(ev==="slow_start"){
             // optional: could show a subtle indicator; no UI beyond chip
+          } else if(ev==="thinking_step"){
+            // Handle thinking step event - add to thinking steps
+            let content: string = "";
+            let isNewStep = false;
+
+            if (typeof data === 'string') {
+              content = data;
+            } else if (data && typeof data === 'object') {
+              const dataObj = data as { content?: string; text?: string; new?: boolean };
+              content = dataObj.content || dataObj.text || "";
+              isNewStep = dataObj.new ?? false;
+            }
+
+            if (content.trim()) {
+              if (isNewStep) {
+                // Explicit new step marker
+                state.addThinkingStep(content);
+              } else {
+                // Update existing step or create first one
+                const currentSteps = useChatStore.getState().thinkingSteps;
+                if (currentSteps.length === 0) {
+                  state.addThinkingStep(content);
+                } else {
+                  state.updateLastThinkingStep(content);
+                }
+              }
+            }
           } else if(ev==="sources"){
             // Handle sources event - add sources to the assistant message
             log.debug('[useChatStream] sources event received', { ev, data, dataType: typeof data });
-            
+
             let sources: Array<{ title: string; host: string; url?: string; date?: string }> | null = null;
-            
+
             if (data && typeof data === 'object' && data.sources) {
               sources = data.sources;
             } else if (data && typeof data === 'string') {
@@ -229,7 +296,7 @@ export function useChatStream(){
                 log.warn('[useChatStream] Failed to parse sources data as JSON');
               }
             }
-            
+
             if (sources && Array.isArray(sources) && sources.length > 0) {
               log.debug('[useChatStream] Injecting sources:', sources.length, sources);
               const currentMsgs = useChatStore.getState().conversations.find(c => c.id === newThreadId)?.messages || [];
