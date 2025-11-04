@@ -78,6 +78,20 @@ check_port() {
     fi
 }
 
+# Function to check HTTP endpoint (uses wget if curl not available)
+check_http() {
+    local url=$1
+    if command -v curl > /dev/null 2>&1; then
+        curl -s "$url" > /dev/null 2>&1
+    elif command -v wget > /dev/null 2>&1; then
+        wget -q --spider "$url" > /dev/null 2>&1
+    else
+        # Fallback: just check if port is listening
+        local port=$(echo "$url" | sed -n 's|.*:\([0-9]*\).*|\1|p')
+        check_port "$port"
+    fi
+}
+
 # Function to kill process on port
 kill_port() {
     local port=$1
@@ -180,6 +194,19 @@ echo ""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR" || exit 1
 
+# Load nvm if available
+if [ -s "$HOME/.nvm/nvm.sh" ]; then
+    export NVM_DIR="$HOME/.nvm"
+    [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+fi
+
+# Verify pnpm is available
+if ! command -v pnpm > /dev/null 2>&1; then
+    echo -e "${RED}❌ Error: pnpm not found${NC}"
+    echo -e "${YELLOW}Please ensure Node.js and pnpm are installed${NC}"
+    exit 1
+fi
+
 # Start Memory Service first (dependency for Hybrid RAG)
 echo -e "${CYAN}📦 Starting Memory Service (port 3001)...${NC}"
 cd "$SCRIPT_DIR/apps/memory-service" || {
@@ -201,17 +228,18 @@ for i in {1..30}; do
         exit 1
     fi
     # Check if metrics endpoint responds
-    if curl -s http://localhost:3001/v1/metrics > /dev/null 2>&1; then
+    if check_http http://localhost:3001/v1/metrics; then
         echo -e "${GREEN}✅ Ready${NC}"
         MEMORY_READY=true
         break
     fi
     # Check for errors in log after a few seconds
     if [ $i -gt 5 ]; then
-        if grep -qi "EMFILE\|too many open files\|Error:" "$SCRIPT_DIR/logs/memory-service.log" 2>/dev/null; then
+        # Ignore expected errors (Redis not available)
+        if grep -qi "EMFILE\|too many open files\|Cannot find module\|SyntaxError\|ReferenceError" "$SCRIPT_DIR/logs/memory-service.log" 2>/dev/null; then
             echo -e "\n${RED}❌ Startup error detected${NC}"
             echo -e "${YELLOW}   Error in log:${NC}"
-            grep -i "EMFILE\|too many open files\|Error:" "$SCRIPT_DIR/logs/memory-service.log" | tail -3 | sed 's/^/   /'
+            grep -i "EMFILE\|too many open files\|Cannot find module\|SyntaxError\|ReferenceError" "$SCRIPT_DIR/logs/memory-service.log" | tail -3 | sed 's/^/   /'
             echo -e "${CYAN}   Run: pkill -f 'tsx.*watch' && ./start-hybrid-rag.sh${NC}"
             exit 1
         fi
@@ -249,19 +277,26 @@ for i in {1..30}; do
         exit 1
     fi
     # Check if health endpoint responds
-    if curl -s http://localhost:3002/health > /dev/null 2>&1; then
+    if check_http http://localhost:3002/health; then
         echo -e "${GREEN}✅ Ready${NC}"
         HYBRID_RAG_READY=true
         break
     fi
     # Check for errors in log after a few seconds
     if [ $i -gt 5 ]; then
-        if grep -qi "EMFILE\|too many open files\|Error:" "$SCRIPT_DIR/logs/hybrid-rag.log" 2>/dev/null; then
+        # Ignore expected errors (Redis/Qdrant not available)
+        if grep -qi "EMFILE\|too many open files\|Cannot find module\|SyntaxError\|ReferenceError" "$SCRIPT_DIR/logs/hybrid-rag.log" 2>/dev/null; then
             echo -e "\n${RED}❌ Startup error detected${NC}"
             echo -e "${YELLOW}   Error in log:${NC}"
-            grep -i "EMFILE\|too many open files\|Error:" "$SCRIPT_DIR/logs/hybrid-rag.log" | tail -3 | sed 's/^/   /'
+            grep -i "EMFILE\|too many open files\|Cannot find module\|SyntaxError\|ReferenceError" "$SCRIPT_DIR/logs/hybrid-rag.log" | tail -3 | sed 's/^/   /'
             echo -e "${CYAN}   Run: pkill -f 'tsx.*watch' && ./start-hybrid-rag.sh${NC}"
             exit 1
+        fi
+        # Check if service is responding (even if degraded)
+        if check_http http://localhost:3002/health; then
+            echo -e "${GREEN}✅ Ready (degraded mode - Qdrant/Redis not available)${NC}"
+            HYBRID_RAG_READY=true
+            break
         fi
     fi
     sleep 1
@@ -330,17 +365,18 @@ for i in {1..40}; do
         exit 1
     fi
     # Check if health endpoint responds
-    if curl -s http://localhost:8787/v1 > /dev/null 2>&1; then
+    if check_http http://localhost:8787/v1; then
         echo -e "${GREEN}✅ Ready${NC}"
         GATEWAY_READY=true
         break
     fi
     # Check for errors in log after a few seconds
     if [ $i -gt 5 ]; then
-        if grep -qi "EMFILE\|too many open files\|Error:" "$SCRIPT_DIR/logs/gateway.log" 2>/dev/null; then
+        # Ignore expected errors (Redis not available)
+        if grep -qi "EMFILE\|too many open files\|Cannot find module\|SyntaxError\|ReferenceError" "$SCRIPT_DIR/logs/gateway.log" 2>/dev/null; then
             echo -e "\n${RED}❌ Startup error detected${NC}"
             echo -e "${YELLOW}   Error in log:${NC}"
-            grep -i "EMFILE\|too many open files\|Error:" "$SCRIPT_DIR/logs/gateway.log" | tail -3 | sed 's/^/   /'
+            grep -i "EMFILE\|too many open files\|Cannot find module\|SyntaxError\|ReferenceError" "$SCRIPT_DIR/logs/gateway.log" | tail -3 | sed 's/^/   /'
             echo -e "${CYAN}   Run: pkill -f 'tsx.*watch' && ./start-hybrid-rag.sh${NC}"
             exit 1
         fi
@@ -379,7 +415,7 @@ if [ "$INGESTION_ENABLED" = true ]; then
             break
         fi
         # Check if health endpoint responds
-        if curl -s http://localhost:$INGESTION_PORT/health > /dev/null 2>&1; then
+        if check_http http://localhost:$INGESTION_PORT/health; then
             echo -e "${GREEN}✅ Ready${NC}"
             INGESTION_READY=true
             break
@@ -409,7 +445,7 @@ cd "$SCRIPT_DIR" || exit 1
 echo -e "${GREEN}   Started (PID: $WEB_PID)${NC}"
 echo -n "   "
 for i in {1..60}; do
-    if curl -s http://localhost:5173 > /dev/null 2>&1; then
+    if check_http http://localhost:5173; then
         echo -e "${GREEN}✅ Ready${NC}"
         break
     fi
@@ -437,7 +473,7 @@ echo -e "${BLUE}🏥 Health Checks:${NC}"
 check_health() {
     local name=$1
     local url=$2
-    if curl -s "$url" > /dev/null 2>&1; then
+    if check_http "$url"; then
         echo -e "  ${GREEN}✅ $name${NC}"
     else
         echo -e "  ${RED}❌ $name${NC}"

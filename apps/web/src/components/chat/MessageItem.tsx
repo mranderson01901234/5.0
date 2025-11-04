@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import MessageContent from './MessageContent';
 import SourcesDropdown from './SourcesDropdown';
 import ThinkingIndicator, { type ThinkingStep } from './ThinkingIndicator';
@@ -37,8 +37,10 @@ const MessageItemBase: React.FC<Props> = ({
 }) => {
   const isUser = msg.role === "user";
   const currentThreadId = useChatStore(s => s.currentThreadId);
-  const artifacts = useArtifactStore(s => s.artifacts);
   const inChatArtifactsEnabled = useUIStore(s => s.inChatArtifactsEnabled);
+  
+  // Subscribe to artifacts array - Zustand already handles shallow comparison
+  const artifacts = useArtifactStore(s => s.artifacts);
   
   // Detect artifact-bearing messages:
   // 1. Check message.meta?.artifactId (if meta exists)
@@ -46,13 +48,16 @@ const MessageItemBase: React.FC<Props> = ({
   const messageMeta = (msg as any).meta as { artifactId?: string } | undefined;
   const artifactId = messageMeta?.artifactId;
   
-  // Get artifacts for this message's thread (show after assistant messages)
-  // If message has artifactId in meta, use that; otherwise show all artifacts for thread
-  const messageArtifacts = !isUser && currentThreadId && inChatArtifactsEnabled
-    ? artifactId
-      ? artifacts.filter(a => a.id === artifactId)
-      : artifacts.filter(a => a.threadId === currentThreadId)
-    : [];
+  // Memoize filtered artifacts to prevent unnecessary re-computation
+  const messageArtifacts = useMemo(() => {
+    if (isUser || !currentThreadId || !inChatArtifactsEnabled) return [];
+    
+    if (artifactId) {
+      return artifacts.filter(a => a.id === artifactId);
+    }
+    
+    return artifacts.filter(a => a.threadId === currentThreadId);
+  }, [isUser, currentThreadId, inChatArtifactsEnabled, artifactId, artifacts]);
   
   const showFRChip = isLastAssistant && frChip && ttfbMs !== undefined && ttfbMs > 400;
   const [copied, setCopied] = useState(false);
@@ -218,7 +223,7 @@ const MessageItemBase: React.FC<Props> = ({
       <div className={isUser ? "max-w-[85%]" : "w-full"} style={{ order: isUser ? 1 : 0 }}>
         {isUser ? (
           <>
-            <div className="bg-gray-200/20 rounded-lg px-3 py-0.5 border border-gray-300/20 inline-block">
+            <div className="rounded-lg px-3 py-0.5 border border-white/[0.10] inline-block" style={{ backgroundColor: 'rgba(255, 255, 255, 0.05)' }}>
               <div className="[&_.message-content-user]:mb-0 [&_.message-content-user_p]:mb-0 [&_.message-content-user]:leading-snug [&_.message-content-user]:pb-0">
                 <MessageContent content={msg.content} isUser={isUser} />
               </div>

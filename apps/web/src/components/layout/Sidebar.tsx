@@ -3,16 +3,19 @@ import { useAuth } from "@clerk/clerk-react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { Settings, Plus, Trash2, BarChart3 } from "../../icons";
-import { Layers } from "lucide-react";
+import { Layers, MessageSquare } from "lucide-react";
 import { useChatStore } from "../../store/chatStore";
 import { useUIStore } from "../../store/uiStore";
 import { cn } from "../../lib/utils";
 import SettingsDialog from "../settings/SettingsDialog";
 import ArtifactsDialog from "../settings/ArtifactsDialog";
+import ConversationsDialog from "../settings/ConversationsDialog";
+import DashboardDialog from "../settings/DashboardDialog";
 import { deleteConversation as deleteConversationApi } from "../../services/gateway";
 import { toastPromise } from "../../utils/toastPromise";
 import { notify } from "../../utils/toast";
 import { useShortcuts } from "../../hooks/useShortcuts";
+import { Tooltip, TooltipTrigger, TooltipContent, TooltipProvider } from "../ui/tooltip";
 
 type ConversationItem = { id: string; title: string };
 
@@ -21,6 +24,8 @@ const SidebarBase: React.FC = () => {
   const [hoverTimeout, setHoverTimeout] = useState<NodeJS.Timeout | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [artifactsOpen, setArtifactsOpen] = useState(false);
+  const [conversationsOpen, setConversationsOpen] = useState(false);
+  const [dashboardOpen, setDashboardOpen] = useState(false);
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const conversations = useChatStore(s => s.conversations);
@@ -40,21 +45,11 @@ const SidebarBase: React.FC = () => {
   useShortcuts({ onOpenSettings: () => setSettingsOpen(true) });
   
   const handleMouseEnter = () => {
-    if (hoverTimeout) clearTimeout(hoverTimeout);
-    const timeout = setTimeout(() => {
-      setExpanded(true);
-      setSidebarExpanded(true);
-    }, 50);
-    setHoverTimeout(timeout);
+    // Disabled auto-expansion
   };
   
   const handleMouseLeave = () => {
-    if (hoverTimeout) clearTimeout(hoverTimeout);
-    const timeout = setTimeout(() => {
-      setExpanded(false);
-      setSidebarExpanded(false);
-    }, 300);
-    setHoverTimeout(timeout);
+    // Disabled auto-collapse
   };
 
   const handleWheel = (e: React.WheelEvent<HTMLDivElement>) => {
@@ -91,157 +86,164 @@ const SidebarBase: React.FC = () => {
   };
 
   return (
-    <>
+    <TooltipProvider>
       <aside
         onMouseEnter={handleMouseEnter}
         onMouseLeave={handleMouseLeave}
         onWheel={handleSidebarWheel}
         className={cn(
-          "group fixed left-0 top-0 h-screen border-r border-white/10 z-20",
-          "glass transition-[width] duration-300 ease-in-out",
-          expanded ? "w-[280px]" : "w-[64px]"
+          "group fixed left-0 top-0 h-screen border-r border-white/[0.12] z-[60]",
+          "transition-[width] duration-300 ease-in-out shadow-2xl",
+          "w-[80px]"
         )}
+        style={{ 
+          backgroundColor: 'rgba(255, 255, 255, 0.03)',
+          boxShadow: '2px 0 8px rgba(0, 0, 0, 0.5)' 
+        }}
         aria-label="Primary navigation"
       >
         <div className="flex h-full flex-col">
           {/* New Chat Button */}
-          <div className={cn(
-            "flex items-center py-3 transition-all",
-            expanded ? "px-3 justify-start" : "px-0 justify-center"
-          )}>
-            <button
-              onClick={newConversation}
-              className={cn(
-                "flex items-center rounded-xl transition-all",
-                "text-white/70 hover:text-white/90 hover:bg-white/5",
-                expanded ? "w-full px-2 py-2 justify-start" : "w-10 h-10 p-0 justify-center"
-              )}
-              aria-label="New Chat"
-            >
-              <Plus className={cn(
-                "h-5 w-5 flex-shrink-0 transition-opacity duration-100",
-                expanded ? "opacity-0" : "opacity-100"
-              )}/>
-              <span className={cn(
-                "transition-all duration-300",
-                expanded ? "opacity-100 text-base" : "opacity-0 w-0 overflow-hidden text-sm"
-              )}>New Chat</span>
-            </button>
+          <div className="flex items-center py-4 px-0 justify-center">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={newConversation}
+                  className={cn(
+                    "flex items-center rounded-lg transition-all border border-white/[0.06]",
+                    "text-white/70 hover:text-white/90 bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/[0.12]",
+                    "w-14 h-14 p-0 justify-center"
+                  )}
+                  aria-label="New Chat"
+                >
+                  <Plus className="h-7 w-7 flex-shrink-0" />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent 
+                side="right" 
+                sideOffset={8}
+                className="!bg-white/[0.03] border border-white/[0.12] text-white/90 px-3 py-1.5 text-xs rounded-md shadow-lg"
+              >
+                <p>New Chat</p>
+              </TooltipContent>
+            </Tooltip>
           </div>
 
-          {/* Conversations List */}
-          {expanded && (
-            <nav 
-              aria-label="Conversations"
-              className="flex-1 min-h-0 overflow-hidden"
-            >
-              <div 
-                ref={conversationsListRef}
-                onWheel={handleWheel}
-                className="h-full overflow-y-auto scrollbar-hide mt-2 space-y-1 px-1"
-              >
-                <ul role="list" className="space-y-1">
-                  {items.map((conv) => (
-                    <li key={conv.id}>
-                      <div
-                        className={cn(
-                          "relative flex items-center w-full rounded-xl transition-all group",
-                          currentThreadId === conv.id
-                            ? "bg-white/5"
-                            : "hover:bg-white/5"
-                        )}
-                      >
-                        <button
-                          onClick={() => switchConversation(conv.id)}
-                          className={cn(
-                            "flex items-center w-full py-2 transition-all justify-start gap-3 px-2 pr-10",
-                            currentThreadId === conv.id
-                              ? "text-white/95"
-                              : "text-white/70 hover:text-white/90"
-                          )}
-                          aria-label={`Open conversation: ${conv.title}`}
-                        >
-                          <span className="text-base truncate">{conv.title}</span>
-                        </button>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onDelete(conv.id);
-                          }}
-                          className="sidebar-delete-btn"
-                          aria-label={`Delete ${conv.title}`}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            </nav>
-          )}
+          {/* Spacer */}
+          <div className="flex-1" />
 
-          {/* Bottom Section: Artifacts, Dashboard and Settings - Sticky */}
-          <div className="mt-auto sticky bottom-0 px-1 pb-3 pt-2 space-y-1 bg-[#0f0f0f]/95 backdrop-blur-sm border-t border-white/10">
+          {/* Bottom Section: Conversations, Artifacts, Dashboard and Settings - Sticky */}
+          <div className="mt-auto sticky bottom-0 px-2 pb-4 pt-3 space-y-2 border-t border-white/[0.08]" style={{ backgroundColor: 'rgba(255, 255, 255, 0.03)' }}>
+            {/* Conversations Button */}
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setConversationsOpen(true)}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg px-3 py-3 text-white/70 hover:text-white/90 w-full transition-all border border-white/[0.06]",
+                    conversationsOpen 
+                      ? 'bg-white/[0.04] border-white/[0.12]' 
+                      : 'bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/[0.12]',
+                    "justify-center"
+                  )}
+                  aria-label="Conversations"
+                >
+                  <MessageSquare className="h-6 w-6 flex-shrink-0"/>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent 
+                side="right" 
+                sideOffset={8}
+                className="!bg-white/[0.03] border border-white/[0.12] text-white/90 px-3 py-1.5 text-xs rounded-md shadow-lg"
+              >
+                <p>Conversations</p>
+              </TooltipContent>
+            </Tooltip>
+
             {/* Artifacts Button */}
-            <button
-              onClick={() => setArtifactsOpen(true)}
-              className={cn(
-                "flex items-center gap-3 rounded-xl px-2 py-2 text-white/70 hover:text-white/90 hover:bg-white/5 w-full transition-all",
-                artifactsOpen ? 'bg-white/10' : ''
-              )}
-              aria-label="Artifacts"
-            >
-              <Layers className="h-5 w-5 flex-shrink-0"/>
-              <span className={cn(
-                "transition-opacity duration-300",
-                expanded ? "opacity-100 text-base" : "opacity-0 text-sm"
-              )}>Artifacts</span>
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setArtifactsOpen(true)}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg px-3 py-3 text-white/70 hover:text-white/90 w-full transition-all border border-white/[0.06]",
+                    artifactsOpen 
+                      ? 'bg-white/[0.04] border-white/[0.12]' 
+                      : 'bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/[0.12]',
+                    "justify-center"
+                  )}
+                  aria-label="Artifacts"
+                >
+                  <Layers className="h-6 w-6 flex-shrink-0"/>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent 
+                side="right" 
+                sideOffset={8}
+                className="!bg-white/[0.03] border border-white/[0.12] text-white/90 px-3 py-1.5 text-xs rounded-md shadow-lg"
+              >
+                <p>Artifacts</p>
+              </TooltipContent>
+            </Tooltip>
 
             {/* Dashboard Button */}
-            <button
-              onClick={() => {
-                if (pathname === '/dashboard') {
-                  navigate('/');
-                } else {
-                  navigate('/dashboard');
-                }
-              }}
-              className={cn(
-                "flex items-center gap-3 rounded-xl px-2 py-2 text-white/70 hover:text-white/90 hover:bg-white/5 w-full transition-all",
-                pathname === '/dashboard' ? 'bg-white/10' : ''
-              )}
-              aria-label={pathname === '/dashboard' ? 'Return to chat' : 'Open dashboard'}
-            >
-              <BarChart3 className="h-5 w-5 flex-shrink-0"/>
-              <span className={cn(
-                "transition-opacity duration-300",
-                expanded ? "opacity-100 text-base" : "opacity-0 text-sm"
-              )}>Dashboard</span>
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setDashboardOpen(true)}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg px-3 py-3 text-white/70 hover:text-white/90 w-full transition-all border border-white/[0.06]",
+                    dashboardOpen 
+                      ? 'bg-white/[0.04] border-white/[0.12]' 
+                      : 'bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/[0.12]',
+                    "justify-center"
+                  )}
+                  aria-label="Dashboard"
+                >
+                  <BarChart3 className="h-6 w-6 flex-shrink-0"/>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent 
+                side="right" 
+                sideOffset={8}
+                className="!bg-white/[0.03] border border-white/[0.12] text-white/90 px-3 py-1.5 text-xs rounded-md shadow-lg"
+              >
+                <p>Dashboard</p>
+              </TooltipContent>
+            </Tooltip>
 
             {/* Settings Button */}
-            <button
-              onClick={() => setSettingsOpen(true)}
-              className={cn(
-                "flex items-center gap-3 rounded-xl px-2 py-2 text-white/70 hover:text-white/90 hover:bg-white/5 w-full"
-              )}
-              aria-label="Settings"
-            >
-              <Settings className="h-5 w-5 flex-shrink-0"/>
-              <span className={cn(
-                "transition-opacity duration-300",
-                expanded ? "opacity-100 text-base" : "opacity-0 text-sm"
-              )}>Settings</span>
-            </button>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  onClick={() => setSettingsOpen(true)}
+                  className={cn(
+                    "flex items-center gap-3 rounded-lg px-3 py-3 text-white/70 hover:text-white/90 w-full transition-all border border-white/[0.06]",
+                    "bg-white/[0.02] hover:bg-white/[0.04] hover:border-white/[0.12]",
+                    "justify-center"
+                  )}
+                  aria-label="Settings"
+                >
+                  <Settings className="h-6 w-6 flex-shrink-0"/>
+                </button>
+              </TooltipTrigger>
+              <TooltipContent 
+                side="right" 
+                sideOffset={8}
+                className="!bg-white/[0.03] border border-white/[0.12] text-white/90 px-3 py-1.5 text-xs rounded-md shadow-lg"
+              >
+                <p>Settings</p>
+              </TooltipContent>
+            </Tooltip>
           </div>
         </div>
       </aside>
 
       <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
       <ArtifactsDialog open={artifactsOpen} onOpenChange={setArtifactsOpen} />
-    </>
+      <ConversationsDialog open={conversationsOpen} onOpenChange={setConversationsOpen} />
+      <DashboardDialog open={dashboardOpen} onOpenChange={setDashboardOpen} />
+    </TooltipProvider>
   );
 };
 

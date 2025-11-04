@@ -43,6 +43,7 @@ type State = {
   researchSummary?: string;
   thinkingSteps: ThinkingStep[];
   currentView: View;
+  messageLoadTracker: Map<string, { messageIds: Set<string>; timestamp: number }>;
 
   // Actions
   add(m:Msg):void;
@@ -65,16 +66,14 @@ type State = {
   setView(view: View): void;
 };
 
-// Track message loads to prevent duplicates - stored outside Zustand to persist across renders
-const messageLoadTracker = new Map<string, { messageIds: Set<string>; timestamp: number }>();
-
-export const useChatStore = create<State>((set)=>({
+export const useChatStore = create<State>((set, get)=>({
   conversations: [],
   currentThreadId: "",
   streaming: false,
   activeStreams: 0,
   thinkingSteps: [],
   currentView: 'chat',
+  messageLoadTracker: new Map<string, { messageIds: Set<string>; timestamp: number }>(),
   
   add: (m) => set((s) => {
     const conv = s.conversations.find(c => c.id === s.currentThreadId);
@@ -273,7 +272,7 @@ export const useChatStore = create<State>((set)=>({
     }
     
     // Also check tracker as secondary defense
-    const tracker = messageLoadTracker.get(threadId);
+    const tracker = get().messageLoadTracker.get(threadId);
     
     if (tracker) {
       const trackerIds = new Set(Array.from(tracker.messageIds).map(normalizeId));
@@ -317,7 +316,8 @@ export const useChatStore = create<State>((set)=>({
         const finalMessages = uniqueMsgs as Msg[];
         
         // Update tracker BEFORE setting state
-        messageLoadTracker.set(threadId, {
+        const tracker = get().messageLoadTracker;
+        tracker.set(threadId, {
           messageIds: new Set(finalMessages.map(m => normalizeId(m.id))),
           timestamp: Date.now()
         });

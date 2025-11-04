@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs ls:*)",
+      "Bash(npm run build:*)",
+      "Bash(node test-newsdata-config.js:*)",
+      "Bash(sqlite3:*)",
+      "Bash(node test-fts5-support.js:*)",
+      "Bash(pnpm dev:*)",
+      "Bash(node test-gateway-fts5.js:*)",
+      "Bash(curl:*)",
+      "Bash(lsof:*)",
+      "Bash(pkill:*)",
+      "Bash(pnpm install:*)",
+      "Bash(node test-ingestion-embeddings.js:*)",
+      "Bash(node:*)",
+      "Bash(for:*)",
+      "Bash(do curl -s -X POST http://localhost:3001/v1/events/message -H 'Content-Type: application/json' -H 'x-user-id: test-real-user' -H 'x-internal-service: gateway' -d '{\n      userId: test-real-user,\n      threadId: test-realthread-$(date +%s),\n      msgId: msg-$i,\n      role: user,\n      content: I prefer using React with TypeScript for all my frontend projects. It gives me better type safety.,\n      tokens: {input: 20, output: 0},\n      timestamp: $(date +%s)000\n    }' echo 'Sent message $i' sleep 0.2 done echo 'Done - checking metrics...' sleep 2 curl -s http://localhost:3001/v1/metrics)",
+      "Bash(cat:*)",
+      "Bash(python3:*)",
+      "Bash(pnpm tsx:*)",
+      "Bash(find:*)",
+      "Bash(/tmp/test_remember_fixed.sh)",
+      "Bash(bash:*)",
+      "Bash(pnpm run build:*)"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "outputStyle": "default"
+}

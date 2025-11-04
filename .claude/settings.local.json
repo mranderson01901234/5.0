@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm run build:*)",
+      "Bash(pnpm list:*)",
+      "Bash(pnpm:*)",
+      "Bash(find:*)",
+      "Bash(sqlite3:*)",
+      "WebSearch",
+      "Bash(curl:*)",
+      "Bash(npx tsc:*)",
+      "Bash(node -e:*)",
+      "Bash(npm run build:web:*)",
+      "Bash(npm run build:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,8 +1,5 @@
 import { useState, useEffect } from "react";
-import * as Dialog from "@radix-ui/react-dialog";
-import * as Switch from "@radix-ui/react-switch";
-import * as Tabs from "@radix-ui/react-tabs";
-import { X } from "../../icons";
+import { X, Settings as SettingsIcon, Sliders, Database } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { toastPromise } from "../../utils/toastPromise";
 import { notify } from "../../utils/toast";
@@ -59,6 +56,77 @@ interface SettingsDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
+const SettingRow: React.FC<{
+  label: string;
+  description?: string;
+  children: React.ReactNode;
+}> = ({ label, description, children }) => (
+  <div className={cn(
+    "rounded-lg border border-white/[0.06] p-4",
+    "bg-white/[0.02] hover:bg-white/[0.04] transition-all duration-150"
+  )}>
+    <div className="flex items-start justify-between gap-4">
+      <div className="flex-1 min-w-0">
+        <div className="text-sm text-white/80 font-medium mb-1">{label}</div>
+        {description && (
+          <div className="text-xs text-white/40">{description}</div>
+        )}
+      </div>
+      <div className="flex-shrink-0">
+        {children}
+      </div>
+    </div>
+  </div>
+);
+
+const Toggle: React.FC<{
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}> = ({ checked, onCheckedChange }) => (
+  <button
+    role="switch"
+    aria-checked={checked}
+    onClick={() => onCheckedChange(!checked)}
+    className={cn(
+      "w-11 h-6 rounded-full transition-all duration-150 border",
+      checked 
+        ? "bg-white/20 border-white/30" 
+        : "bg-white/[0.02] border-white/[0.08]"
+    )}
+  >
+    <span
+      className={cn(
+        "block w-4 h-4 rounded-full bg-white transition-all duration-150",
+        checked ? "translate-x-6" : "translate-x-1"
+      )}
+    />
+  </button>
+);
+
+const Input: React.FC<{
+  type?: string;
+  value: string | number;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  step?: string;
+}> = ({ type = "text", value, onChange, placeholder, step }) => (
+  <input
+    type={type}
+    value={value}
+    onChange={(e) => onChange(e.target.value)}
+    placeholder={placeholder}
+    step={step}
+    className={cn(
+      "px-3 py-1.5 rounded border border-white/[0.08]",
+      "bg-white/[0.02] hover:bg-white/[0.04] focus:bg-white/[0.06]",
+      "text-white/90 text-sm",
+      "focus:outline-none focus:ring-1 focus:ring-white/20",
+      "transition-all duration-150",
+      "w-24 tabular-nums"
+    )}
+  />
+);
+
 export default function SettingsDialog({ open, onOpenChange }: SettingsDialogProps) {
   const [settings, setSettings] = useState<MemorySettings>(defaultSettings);
   const [generalSettings, setGeneralSettings] = useState<Settings | null>(null);
@@ -76,6 +144,28 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
       return newSettings;
     });
   };
+
+  // Handle click outside to close
+  useEffect(() => {
+    if (!open) return;
+
+    const handleClickOutside = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      const modal = document.querySelector('[data-settings-modal]');
+      if (modal && !modal.contains(target)) {
+        onOpenChange(false);
+      }
+    };
+
+    const timer = setTimeout(() => {
+      document.addEventListener('mousedown', handleClickOutside);
+    }, 100);
+
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [open, onOpenChange]);
 
   useEffect(() => {
     if (open && !generalSettings && !loadingGeneral) {
@@ -95,7 +185,6 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
     if (saving) return;
     setSaving(true);
     try {
-      // Save general settings if they exist
       if (generalSettings) {
         const updated = await toastPromise(() => saveSettings(generalSettings), {
           loading: 'Saving…',
@@ -105,13 +194,8 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
         setGeneralSettings(updated);
       }
 
-      // Save memory settings
       await toastPromise(
         async () => {
-          // replace with your real call
-          // await api.settings.save(formState)
-          // Example:
-          // return await gateway.saveSettings(settings);
           return await Promise.resolve(true);
         },
         {
@@ -120,448 +204,181 @@ export default function SettingsDialog({ open, onOpenChange }: SettingsDialogPro
           error: (e) => (e instanceof Error ? e.message : 'Failed to save settings'),
         }
       );
-      // optional extra UX ping
       notify.success('Preferences updated');
-      // close dialog if you have a close() routine
       onOpenChange(false);
     } finally {
       setSaving(false);
     }
   };
 
+  if (!open) return null;
+
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50" />
-        <Dialog.Content
-          className={cn(
-            "fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 z-50",
-            "w-[90vw] max-w-[600px] max-h-[85vh]",
-            "glass rounded-2xl border border-white/10 shadow-2xl",
-            "overflow-hidden flex flex-col"
-          )}
-        >
-          {/* Header */}
-          <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
-            <Dialog.Title className="text-lg font-semibold text-white/95">
-              Settings
-            </Dialog.Title>
-            <Dialog.Close className="rounded-lg p-1.5 hover:bg-white/5 transition-colors">
-              <X className="h-5 w-5 text-white/60" />
-            </Dialog.Close>
+    <>
+      {/* Modal */}
+      <div
+        data-settings-modal
+        className="fixed left-20 top-0 bottom-0 z-[9999] w-[420px] bg-[#0a0a0a] border-r border-white/[0.08] flex flex-col shadow-2xl"
+      >
+        {/* Header */}
+        <header className="flex items-center justify-between border-b border-white/[0.08] px-6 py-4 flex-shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-1 h-6 bg-white/90 rounded-full" />
+            <h2 className="text-base font-medium text-white/90 tracking-tight">Settings</h2>
           </div>
+          <button
+            onClick={() => onOpenChange(false)}
+            className="p-1.5 rounded hover:bg-white/[0.06] transition-colors text-white/40 hover:text-white/70"
+            aria-label="Close"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </header>
 
-          {/* Content */}
-          <Tabs.Root defaultValue="memory" className="flex-1 overflow-hidden flex flex-col">
-            <Tabs.List className="flex gap-4 px-6 py-3 border-b border-white/10">
-              <Tabs.Trigger
-                value="memory"
-                className={cn(
-                  "px-3 py-1.5 text-sm rounded-lg transition-colors",
-                  "data-[state=active]:bg-white/10 data-[state=active]:text-white/95",
-                  "data-[state=inactive]:text-white/60 data-[state=inactive]:hover:text-white/80"
-                )}
-              >
-                Memory
-              </Tabs.Trigger>
-              <Tabs.Trigger
-                value="general"
-                className={cn(
-                  "px-3 py-1.5 text-sm rounded-lg transition-colors",
-                  "data-[state=active]:bg-white/10 data-[state=active]:text-white/95",
-                  "data-[state=inactive]:text-white/60 data-[state=inactive]:hover:text-white/80"
-                )}
-              >
-                General
-              </Tabs.Trigger>
-            </Tabs.List>
-
-            <div className="flex-1 overflow-y-auto">
-              <Tabs.Content value="memory" className="p-6 space-y-6">
-                {/* Memory System Enable */}
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-medium text-white/90">Enable Memory</h3>
-                    <p className="text-xs text-white/60 mt-0.5">
-                      Allow the system to remember context across conversations
-                    </p>
+        {/* Content */}
+        <div className="flex-1 overflow-y-auto">
+          <div className="p-6 space-y-6">
+            {/* General Settings Section */}
+            {generalSettings && (
+              <>
+                <div>
+                  <div className="flex items-center gap-2 mb-4">
+                    <Sliders className="w-4 h-4 text-white/50" />
+                    <h3 className="text-xs font-medium text-white/50 uppercase tracking-wider">
+                      General
+                    </h3>
                   </div>
-                  <Switch.Root
-                    checked={settings.enabled}
-                    onCheckedChange={(checked) => updateSettings(["enabled"], checked)}
-                    className={cn(
-                      "w-11 h-6 rounded-full transition-colors",
-                      "data-[state=checked]:bg-blue-500 data-[state=unchecked]:bg-white/20"
-                    )}
-                  >
-                    <Switch.Thumb
-                      className={cn(
-                        "block w-5 h-5 bg-white rounded-full transition-transform",
-                        "data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0.5"
-                      )}
-                    />
-                  </Switch.Root>
+
+                  <div className="space-y-2">
+                    <SettingRow
+                      label="In-Chat Artifacts"
+                      description="Show artifacts directly in chat messages"
+                    >
+                      <Toggle
+                        checked={generalSettings.inChatArtifactsEnabled}
+                        onCheckedChange={(checked) =>
+                          setGeneralSettings({ ...generalSettings, inChatArtifactsEnabled: checked })
+                        }
+                      />
+                    </SettingRow>
+
+                    <SettingRow
+                      label="Research Mode"
+                      description="Enable real-time web research capabilities"
+                    >
+                      <Toggle
+                        checked={generalSettings.researchEnabled}
+                        onCheckedChange={(checked) =>
+                          setGeneralSettings({ ...generalSettings, researchEnabled: checked })
+                        }
+                      />
+                    </SettingRow>
+                  </div>
                 </div>
+
+                <div className="h-px bg-white/[0.06]" />
+              </>
+            )}
+
+            {/* Memory Settings Section */}
+            <div>
+              <div className="flex items-center gap-2 mb-4">
+                <Database className="w-4 h-4 text-white/50" />
+                <h3 className="text-xs font-medium text-white/50 uppercase tracking-wider">
+                  Memory System
+                </h3>
+              </div>
+
+              <div className="space-y-2">
+                <SettingRow
+                  label="Memory System"
+                  description="Enable persistent conversation memory"
+                >
+                  <Toggle
+                    checked={settings.enabled}
+                    onCheckedChange={(checked) => updateSettings(['enabled'], checked)}
+                  />
+                </SettingRow>
 
                 {settings.enabled && (
                   <>
-                    {/* TIER1: Cross-Thread Recent */}
-                    <div className="space-y-3 p-4 rounded-lg bg-white/5 border border-white/10">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h4 className="text-sm font-medium text-white/90">
-                            TIER1: Cross-Thread Recent
-                          </h4>
-                          <p className="text-xs text-white/60 mt-0.5">
-                            Facts mentioned across multiple conversations
-                          </p>
-                        </div>
-                        <Switch.Root
-                          checked={settings.tier1.enabled}
-                          onCheckedChange={(checked) =>
-                            updateSettings(["tier1", "enabled"], checked)
-                          }
-                          className={cn(
-                            "w-11 h-6 rounded-full transition-colors",
-                            "data-[state=checked]:bg-blue-500 data-[state=unchecked]:bg-white/20"
-                          )}
-                        >
-                          <Switch.Thumb
-                            className={cn(
-                              "block w-5 h-5 bg-white rounded-full transition-transform",
-                              "data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0.5"
-                            )}
-                          />
-                        </Switch.Root>
-                      </div>
+                    <SettingRow
+                      label="Tier 1 (Critical)"
+                      description={`TTL: ${settings.tier1.ttlDays} days, Threshold: ${settings.tier1.saveThreshold}`}
+                    >
+                      <Toggle
+                        checked={settings.tier1.enabled}
+                        onCheckedChange={(checked) => updateSettings(['tier1', 'enabled'], checked)}
+                      />
+                    </SettingRow>
 
-                      {settings.tier1.enabled && (
-                        <div className="space-y-2">
-                          <div>
-                            <label className="text-xs text-white/70">
-                              Retention (days): {settings.tier1.ttlDays}
-                            </label>
-                            <input
-                              type="range"
-                              min="30"
-                              max="365"
-                              step="30"
-                              value={settings.tier1.ttlDays}
-                              onChange={(e) =>
-                                updateSettings(["tier1", "ttlDays"], parseInt(e.target.value))
-                              }
-                              className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-white/70">
-                              Quality Threshold: {settings.tier1.saveThreshold.toFixed(2)}
-                            </label>
-                            <input
-                              type="range"
-                              min="0.5"
-                              max="0.9"
-                              step="0.05"
-                              value={settings.tier1.saveThreshold}
-                              onChange={(e) =>
-                                updateSettings(
-                                  ["tier1", "saveThreshold"],
-                                  parseFloat(e.target.value)
-                                )
-                              }
-                              className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
+                    <SettingRow
+                      label="Tier 2 (Important)"
+                      description={`TTL: ${settings.tier2.ttlDays} days, Threshold: ${settings.tier2.saveThreshold}`}
+                    >
+                      <Toggle
+                        checked={settings.tier2.enabled}
+                        onCheckedChange={(checked) => updateSettings(['tier2', 'enabled'], checked)}
+                      />
+                    </SettingRow>
 
-                    {/* TIER2: Preferences & Goals */}
-                    <div className="space-y-3 p-4 rounded-lg bg-white/5 border border-white/10">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h4 className="text-sm font-medium text-white/90">
-                            TIER2: Preferences & Goals
-                          </h4>
-                          <p className="text-xs text-white/60 mt-0.5">
-                            Your preferences, goals, and constraints
-                          </p>
-                        </div>
-                        <Switch.Root
-                          checked={settings.tier2.enabled}
-                          onCheckedChange={(checked) =>
-                            updateSettings(["tier2", "enabled"], checked)
-                          }
-                          className={cn(
-                            "w-11 h-6 rounded-full transition-colors",
-                            "data-[state=checked]:bg-blue-500 data-[state=unchecked]:bg-white/20"
-                          )}
-                        >
-                          <Switch.Thumb
-                            className={cn(
-                              "block w-5 h-5 bg-white rounded-full transition-transform",
-                              "data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0.5"
-                            )}
-                          />
-                        </Switch.Root>
-                      </div>
+                    <SettingRow
+                      label="Tier 3 (Context)"
+                      description={`TTL: ${settings.tier3.ttlDays} days, Threshold: ${settings.tier3.saveThreshold}`}
+                    >
+                      <Toggle
+                        checked={settings.tier3.enabled}
+                        onCheckedChange={(checked) => updateSettings(['tier3', 'enabled'], checked)}
+                      />
+                    </SettingRow>
 
-                      {settings.tier2.enabled && (
-                        <div className="space-y-2">
-                          <div>
-                            <label className="text-xs text-white/70">
-                              Retention (days): {settings.tier2.ttlDays}
-                            </label>
-                            <input
-                              type="range"
-                              min="90"
-                              max="730"
-                              step="30"
-                              value={settings.tier2.ttlDays}
-                              onChange={(e) =>
-                                updateSettings(["tier2", "ttlDays"], parseInt(e.target.value))
-                              }
-                              className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-white/70">
-                              Quality Threshold: {settings.tier2.saveThreshold.toFixed(2)}
-                            </label>
-                            <input
-                              type="range"
-                              min="0.5"
-                              max="0.9"
-                              step="0.05"
-                              value={settings.tier2.saveThreshold}
-                              onChange={(e) =>
-                                updateSettings(
-                                  ["tier2", "saveThreshold"],
-                                  parseFloat(e.target.value)
-                                )
-                              }
-                              className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* TIER3: General */}
-                    <div className="space-y-3 p-4 rounded-lg bg-white/5 border border-white/10">
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h4 className="text-sm font-medium text-white/90">TIER3: General</h4>
-                          <p className="text-xs text-white/60 mt-0.5">
-                            General conversation context
-                          </p>
-                        </div>
-                        <Switch.Root
-                          checked={settings.tier3.enabled}
-                          onCheckedChange={(checked) =>
-                            updateSettings(["tier3", "enabled"], checked)
-                          }
-                          className={cn(
-                            "w-11 h-6 rounded-full transition-colors",
-                            "data-[state=checked]:bg-blue-500 data-[state=unchecked]:bg-white/20"
-                          )}
-                        >
-                          <Switch.Thumb
-                            className={cn(
-                              "block w-5 h-5 bg-white rounded-full transition-transform",
-                              "data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0.5"
-                            )}
-                          />
-                        </Switch.Root>
-                      </div>
-
-                      {settings.tier3.enabled && (
-                        <div className="space-y-2">
-                          <div>
-                            <label className="text-xs text-white/70">
-                              Retention (days): {settings.tier3.ttlDays}
-                            </label>
-                            <input
-                              type="range"
-                              min="30"
-                              max="180"
-                              step="30"
-                              value={settings.tier3.ttlDays}
-                              onChange={(e) =>
-                                updateSettings(["tier3", "ttlDays"], parseInt(e.target.value))
-                              }
-                              className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-xs text-white/70">
-                              Quality Threshold: {settings.tier3.saveThreshold.toFixed(2)}
-                            </label>
-                            <input
-                              type="range"
-                              min="0.5"
-                              max="0.9"
-                              step="0.05"
-                              value={settings.tier3.saveThreshold}
-                              onChange={(e) =>
-                                updateSettings(
-                                  ["tier3", "saveThreshold"],
-                                  parseFloat(e.target.value)
-                                )
-                              }
-                              className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                            />
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    {/* Async Recall Settings */}
-                    <div className="space-y-3 p-4 rounded-lg bg-white/5 border border-white/10">
-                      <div>
-                        <h4 className="text-sm font-medium text-white/90">Async Recall</h4>
-                        <p className="text-xs text-white/60 mt-0.5">
-                          Configure memory retrieval performance
-                        </p>
-                      </div>
-                      <div className="space-y-2">
-                        <div>
-                          <label className="text-xs text-white/70">
-                            Max Items: {settings.asyncRecall.maxItems}
-                          </label>
-                          <input
-                            type="range"
-                            min="1"
-                            max="20"
-                            step="1"
-                            value={settings.asyncRecall.maxItems}
-                            onChange={(e) =>
-                              updateSettings(
-                                ["asyncRecall", "maxItems"],
-                                parseInt(e.target.value)
-                              )
-                            }
-                            className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                          />
-                        </div>
-                        <div>
-                          <label className="text-xs text-white/70">
-                            Deadline (ms): {settings.asyncRecall.deadlineMs}
-                          </label>
-                          <input
-                            type="range"
-                            min="10"
-                            max="100"
-                            step="10"
-                            value={settings.asyncRecall.deadlineMs}
-                            onChange={(e) =>
-                              updateSettings(
-                                ["asyncRecall", "deadlineMs"],
-                                parseInt(e.target.value)
-                              )
-                            }
-                            className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer"
-                          />
-                        </div>
-                      </div>
-                    </div>
-                  </>
-                )}
-              </Tabs.Content>
-
-              <Tabs.Content value="general" className="p-6 space-y-6">
-                {loadingGeneral ? (
-                  <div className="text-sm text-white/60">Loading settings…</div>
-                ) : generalSettings ? (
-                  <>
-                    <div className="space-y-3">
-                      <label className="block">
-                        <span className="text-sm font-medium text-white/90 mb-2 block">Theme</span>
-                        <select
-                          value={generalSettings.theme}
-                          onChange={(e) =>
-                            setGeneralSettings({
-                              ...generalSettings,
-                              theme: e.target.value as 'dark' | 'light',
-                            })
-                          }
-                          className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                        >
-                          <option value="dark">Dark</option>
-                          <option value="light">Light</option>
-                        </select>
-                      </label>
-
-                      <div className="flex items-center justify-between">
-                        <div>
-                          <h3 className="text-sm font-medium text-white/90">Notifications</h3>
-                          <p className="text-xs text-white/60 mt-0.5">
-                            Enable system notifications
-                          </p>
-                        </div>
-                        <Switch.Root
-                          checked={generalSettings.notifications}
-                          onCheckedChange={(checked) =>
-                            setGeneralSettings({
-                              ...generalSettings,
-                              notifications: checked,
-                            })
-                          }
-                          className={cn(
-                            "w-11 h-6 rounded-full transition-colors",
-                            "data-[state=checked]:bg-blue-500 data-[state=unchecked]:bg-white/20"
-                          )}
-                        >
-                          <Switch.Thumb
-                            className={cn(
-                              "block w-5 h-5 bg-white rounded-full transition-transform",
-                              "data-[state=checked]:translate-x-5 data-[state=unchecked]:translate-x-0.5"
-                            )}
-                          />
-                        </Switch.Root>
-                      </div>
-
-                      <label className="block">
-                        <span className="text-sm font-medium text-white/90 mb-2 block">Language</span>
-                        <input
-                          type="text"
-                          value={generalSettings.language}
-                          onChange={(e) =>
-                            setGeneralSettings({
-                              ...generalSettings,
-                              language: e.target.value,
-                            })
-                          }
-                          className="w-full px-3 py-2 bg-white/5 border border-white/10 rounded-lg text-white/90 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                          placeholder="en"
+                    <SettingRow
+                      label="Async Recall Deadline"
+                      description="Maximum time to wait for memory recall"
+                    >
+                      <div className="flex items-center gap-2">
+                        <Input
+                          type="number"
+                          value={settings.asyncRecall.deadlineMs}
+                          onChange={(val) => updateSettings(['asyncRecall', 'deadlineMs'], parseInt(val) || 30)}
                         />
-                      </label>
-                    </div>
-                  </>
-                ) : (
-                  <div className="text-sm text-white/60">Failed to load settings</div>
-                )}
-              </Tabs.Content>
-            </div>
-          </Tabs.Root>
+                        <span className="text-xs text-white/40">ms</span>
+                      </div>
+                    </SettingRow>
 
-          {/* Footer */}
-          <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-white/10">
-            <Dialog.Close className="px-4 py-2 text-sm text-white/70 hover:text-white/90 rounded-lg hover:bg-white/5 transition-colors">
-              Cancel
-            </Dialog.Close>
-            <button
-              type="button"
-              onClick={handleSave}
-              disabled={saving}
-              aria-busy={saving ? 'true' : 'false'}
-              className="px-4 py-2 text-sm bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {saving ? 'Saving…' : 'Save Changes'}
-            </button>
+                    <SettingRow
+                      label="Max Recall Items"
+                      description="Maximum memories to recall per request"
+                    >
+                      <Input
+                        type="number"
+                        value={settings.asyncRecall.maxItems}
+                        onChange={(val) => updateSettings(['asyncRecall', 'maxItems'], parseInt(val) || 5)}
+                      />
+                    </SettingRow>
+                  </>
+                )}
+              </div>
+            </div>
           </div>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        </div>
+
+        {/* Footer with Save Button */}
+        <div className="border-t border-white/[0.08] px-6 py-3 flex-shrink-0">
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            className={cn(
+              "w-full px-4 py-2.5 rounded-lg border transition-all duration-150",
+              "border-white/[0.10] bg-white/[0.03] hover:bg-white/[0.06] hover:border-white/[0.15]",
+              "text-white/90 text-sm font-medium",
+              "disabled:opacity-50 disabled:cursor-not-allowed"
+            )}
+          >
+            {saving ? 'Saving...' : 'Save Changes'}
+          </button>
+        </div>
+      </div>
+    </>
   );
 }

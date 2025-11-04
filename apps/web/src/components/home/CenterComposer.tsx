@@ -3,7 +3,7 @@ import { cn } from "../../lib/utils";
 import { useChatStream } from "../../hooks/useChatStream";
 import { useChatStore } from "../../store/chatStore";
 import { log } from "../../utils/logger";
-import { useAuth } from "@clerk/clerk-react";
+import { useAuth, useUser } from "@clerk/clerk-react";
 import { Paperclip } from "lucide-react";
 import { uploadFile, type UploadResponse } from "../../services/upload";
 import { optimizeImage, canOptimizeImage } from "../../utils/imageOptimization";
@@ -27,6 +27,7 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
   const dropZoneRef = useRef<HTMLDivElement>(null);
   const { send } = useChatStream();
   const { getToken } = useAuth();
+  const { isSignedIn } = useUser();
   const activeStreams = useChatStore(s => s.activeStreams);
   const currentThreadId = useChatStore(s => s.currentThreadId);
 
@@ -152,6 +153,12 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
   }, []);
 
   const handleSubmit = useCallback(async () => {
+    // Don't allow submitting if not signed in
+    if (!isSignedIn) {
+      log.warn("User must be signed in to send messages");
+      return;
+    }
+    
     if (!value.trim() && attachments.length === 0) return;
     if (activeStreams >= 2) {
       log.warn("Stream limit reached");
@@ -210,7 +217,7 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
     send(value.trim() || (attachmentData.length > 0 ? ' ' : ''), attachmentData.length > 0 ? attachmentData : undefined);
     setValue("");
     setAttachments([]);
-  }, [value, attachments, activeStreams, send, getToken, currentThreadId]);
+  }, [value, attachments, activeStreams, send, getToken, currentThreadId, isSignedIn]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
@@ -220,8 +227,8 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
   }, [handleSubmit]);
 
   const isDisabled = useMemo(() => 
-    activeStreams >= 2 || (!value.trim() && attachments.length === 0) || uploading,
-    [activeStreams, value, attachments.length, uploading]
+    !isSignedIn || activeStreams >= 2 || (!value.trim() && attachments.length === 0) || uploading,
+    [activeStreams, value, attachments.length, uploading, isSignedIn]
   );
 
   return (
@@ -256,13 +263,14 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
       <div 
         ref={dropZoneRef}
         className={cn(
-          "relative rounded-2xl",
-          "border transition-all duration-200",
+          "relative rounded-lg",
+          "border border-white/[0.10] transition-all duration-150",
           isDragging 
             ? "border-white/40 bg-white/10 border-dashed" 
-            : "border-white/15 bg-[#0f0f0f]",
-          "backdrop-blur-xl overflow-hidden"
+            : "bg-white/[0.03] hover:bg-white/[0.05] hover:border-white/[0.15]",
+          "overflow-hidden shadow-lg"
         )}
+        style={{ boxShadow: '0 2px 12px rgba(0, 0, 0, 0.3)' }}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
         onDragOver={handleDragOver}
@@ -302,16 +310,16 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
           <label
             htmlFor="file-upload"
             className={cn(
-              "absolute bottom-3 left-3 rounded-lg cursor-pointer",
+              "absolute bottom-2.5 left-2.5 rounded cursor-pointer",
               "flex items-center justify-center",
-              "transition-all duration-200",
-              isLarge ? "h-11 w-11" : "h-9 w-9",
-              "bg-white/10 text-white/90 hover:bg-white/20 border border-white/20 hover:border-white/30",
+              "transition-all duration-150",
+              isLarge ? "h-8 w-8" : "h-7 w-7",
+              "bg-white/[0.02] text-white/50 hover:text-white/80 hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12]",
               uploading && "opacity-50 cursor-not-allowed"
             )}
             aria-label="Attach file"
           >
-            <Paperclip className={isLarge ? "w-5 h-5" : "w-4 h-4"} />
+            <Paperclip className={isLarge ? "w-4 h-4" : "w-3.5 h-3.5"} />
             <input
               id="file-upload"
               ref={fileInputRef}
@@ -330,13 +338,13 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
               type="button"
               onClick={() => setShowOptimizationModal(true)}
               className={cn(
-                "absolute rounded-lg",
-                "px-3 text-xs transition-all duration-200",
+                "absolute rounded",
+                "px-2.5 text-[11px] font-medium transition-all duration-150",
                 isLarge
-                  ? "right-16 bottom-4 h-11"
-                  : "right-14 bottom-3 h-9",
-                "bg-white/10 text-white/70 hover:text-white/90 hover:bg-white/15",
-                "border border-white/20 hover:border-white/30"
+                  ? "right-12 bottom-2.5 h-8"
+                  : "right-11 bottom-2.5 h-7",
+                "bg-white/[0.02] text-white/50 hover:text-white/80 hover:bg-white/[0.06]",
+                "border border-white/[0.06] hover:border-white/[0.12]"
               )}
               aria-label="Optimize prompt"
             >
@@ -350,21 +358,21 @@ const CenterComposerBase: React.FC<CenterComposerProps> = ({ isLarge = false }) 
             aria-label="Send message"
             disabled={isDisabled}
             className={cn(
-              "absolute right-3 rounded-lg",
+              "absolute right-2.5 rounded",
               "flex items-center justify-center",
-              "transition-all duration-200",
+              "transition-all duration-150",
               isLarge
-                ? "bottom-4 h-11 w-11"
-                : "bottom-3 h-9 w-9",
+                ? "bottom-2.5 h-8 w-8"
+                : "bottom-2.5 h-7 w-7",
               isDisabled
-                ? "bg-white/5 text-white/30 cursor-not-allowed"
-                : "bg-white/10 text-white/90 hover:bg-white/20 border border-white/20 hover:border-white/30"
+                ? "bg-white/[0.02] text-white/30 cursor-not-allowed border border-white/[0.06]"
+                : "bg-white/[0.02] text-white/50 hover:text-white/80 hover:bg-white/[0.06] border border-white/[0.06] hover:border-white/[0.12]"
             )}
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
-              width={isLarge ? "20" : "18"}
-              height={isLarge ? "20" : "18"}
+              width={isLarge ? "16" : "14"}
+              height={isLarge ? "16" : "14"}
               viewBox="0 0 24 24"
               fill="none"
               stroke="currentColor"

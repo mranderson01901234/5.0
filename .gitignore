@@ -8,3 +8,5 @@ dist/
 *.db-wal
 
 apps/llm-gateway/config/google-service-account.json
+google-chrome-stable.deb
+*.deb

@@ -3,7 +3,7 @@ import { persist } from "zustand/middleware";
 import { nanoid } from "../lib/id";
 import { createArtifact, getArtifacts, deleteArtifact } from "../services/gateway";
 import { logEvent } from "../lib/eventLogger";
-import { useUIStore } from "./uiStore";
+import { artifactStoreEvents } from "./artifactStoreEvents";
 
 export type ArtifactType = "table" | "doc" | "sheet" | "image";
 
@@ -199,13 +199,13 @@ export const useArtifactStore = create<ArtifactState>()(
               };
             });
             
-            // Update UI store's currentArtifactId if it matches the old artifact ID
-            // This ensures the split view stays open even if the artifact ID changes
-            const uiStore = useUIStore.getState();
-            if (uiStore.currentArtifactId === oldId) {
-              console.log('[artifactStore] Updating currentArtifactId from', oldId, 'to', saved.id);
-              uiStore.setCurrentArtifact(saved.id);
-            }
+            // Emit event instead of directly mutating UIStore
+            // UIStore will listen to this event and update accordingly
+            artifactStoreEvents.emit({
+              type: 'artifactIdChanged',
+              oldId,
+              newId: saved.id,
+            });
           } else {
             updatedArtifact = artifact;
           }
@@ -274,12 +274,11 @@ export const useArtifactStore = create<ArtifactState>()(
             };
           });
 
-          // If UI store has this artifact selected, clear it
-          const uiStore = useUIStore.getState();
-          if (uiStore.currentArtifactId === id) {
-            uiStore.setCurrentArtifact(null);
-            uiStore.setSplitView(false);
-          }
+          // Emit event instead of directly mutating UIStore
+          artifactStoreEvents.emit({
+            type: 'artifactDeleted',
+            artifactId: id,
+          });
 
           // Log telemetry event
           logEvent({

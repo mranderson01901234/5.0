@@ -13,10 +13,11 @@
   --purple: 168 85 247;
   --blue: 59 130 246;
 
-  --bg: #0f0f0f;
-  --surface: #12131a;
-  --surface-2: #151724;
-  --border: rgba(255,255,255,0.1);
+  /* Updated to match artifacts sidebar and input box */
+  --bg: #0a0a0a;
+  --surface: #0a0a0a;
+  --surface-2: #0a0a0a;
+  --border: rgba(255,255,255,0.08);
   --text: rgba(255,255,255,0.95);
   --muted: rgba(255,255,255,0.5);
   --accent: #a855f7;
@@ -56,12 +57,12 @@ html, body {
 /* Note: #artifact-scroll adds CSS containment, touch-action, scroll-behavior (see below) */
 
 body {
-  @apply bg-[#0f0f0f] text-white/95 antialiased;
+  @apply bg-[#0a0a0a] text-white/95 antialiased;
   font-family: 'Courier New', 'Monaco', 'Consolas', monospace;
   position: relative;
 }
 
-/* Semi-transparent overlay to slightly lighten the background */
+/* Remove overlay - using flat background like artifacts sidebar */
 body::before {
   content: '';
   position: fixed;
@@ -69,14 +70,15 @@ body::before {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(255, 255, 255, 0.03);
+  background: transparent;
   pointer-events: none;
   z-index: -1;
 }
 
-/* Footer overlay to lighten background behind chat input box */
+/* Footer overlay - match artifacts sidebar style */
 .footer-overlay {
   position: relative;
+  background: #0a0a0a;
 }
 
 .footer-overlay::before {
@@ -86,27 +88,24 @@ body::before {
   left: 0;
   right: 0;
   bottom: 0;
-  background: rgba(255, 255, 255, 0.03);
+  background: transparent;
   pointer-events: none;
   z-index: 0;
 }
 
 .glass {
-  @apply backdrop-blur-xl;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
-  border: 1px solid rgba(255, 255, 255, 0.1);
-}
-
-.glass-light {
-  @apply backdrop-blur-[12px];
-  background: rgba(255, 255, 255, 0.05);
+  background: #0a0a0a;
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.glass-light {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
 .glass-heavy {
-  @apply backdrop-blur-[20px];
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.06));
-  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 /* Premium Dark Scrollbar */
@@ -308,6 +307,42 @@ textarea.math-input.text-2xl::placeholder {
 .cl-menuItem:hover {
   background-color: rgba(255, 255, 255, 0.1) !important;
 }
+
+/* Clerk modal positioning - align to right side under header buttons */
+.cl-modalBackdrop {
+  background: transparent !important;
+  display: flex !important;
+  align-items: flex-start !important;
+  justify-content: flex-end !important;
+  padding: 4.5rem 2.5rem 0 0 !important;
+}
+
+.cl-modal {
+  position: relative !important;
+  margin: 0 !important;
+}
+
+.cl-modalBox {
+  margin: 0 !important;
+  max-width: 400px !important;
+}
+
+.cl-card {
+  margin: 0 !important;
+  padding: 3rem 2rem !important;
+}
+
+/* Make name field labels and optional text smaller */
+.cl-formFieldLabel {
+  font-size: 14px !important;
+}
+
+/* Make placeholder text semi-transparent */
+.cl-formFieldInput::placeholder {
+  opacity: 0.5 !important;
+}
+
+
 .message-content h2 { font-size: 1.3em; }
 .message-content h3 { font-size: 1.15em; }
 

@@ -35,31 +35,38 @@ const ArtifactMessageCard: React.FC<Props> = ({ artifact, isExpanded: initialExp
       if (activeExports.length === 0) return;
 
       const token = await getToken();
+
+      // Batch all status checks first
+      const updates: Record<string, ExportState> = {};
+      const urlsToOpen: string[] = [];
+
       for (const [format, state] of activeExports) {
         if (!state.exportId) continue;
 
         try {
           const status = await getExportStatus(state.exportId, token || undefined);
-          setExportStates((prev) => ({
-            ...prev,
-            [format]: {
-              status: status.status,
-              exportId: status.id,
-              url: status.url,
-            },
-          }));
+          updates[format] = {
+            status: status.status,
+            exportId: status.id,
+            url: status.url,
+          };
 
-          // If completed, open download link
+          // If completed, mark URL to open
           if (status.status === 'completed' && status.url && !state.url) {
-            window.open(status.url, '_blank');
+            urlsToOpen.push(status.url);
           }
         } catch (error) {
           console.error(`[ArtifactMessageCard] Failed to poll export status for ${format}:`, error);
-          setExportStates((prev) => ({
-            ...prev,
-            [format]: { ...prev[format], status: 'failed' },
-          }));
+          updates[format] = { ...state, status: 'failed' };
         }
+      }
+
+      // Single batched state update
+      if (Object.keys(updates).length > 0) {
+        setExportStates((prev) => ({ ...prev, ...updates }));
+
+        // Open URLs after state update
+        urlsToOpen.forEach(url => window.open(url, '_blank'));
       }
     }, 2000); // Poll every 2 seconds
 

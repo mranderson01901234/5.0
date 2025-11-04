@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import { useAuth } from '@clerk/clerk-react';
 import { X, Download, Trash2, Image as ImageIcon, Table as TableIcon, FileText, Sheet, ChevronRight } from 'lucide-react';
 import { useArtifactStore } from '@/store/artifactStore';
@@ -23,6 +23,7 @@ interface ExportState {
 
 const ArtifactsDialog: React.FC<ArtifactsDialogProps> = ({ open, onOpenChange }) => {
   const { getToken } = useAuth();
+  // Subscribe to artifacts array - Zustand already handles shallow comparison
   const artifacts = useArtifactStore((s) => s.artifacts);
   const removeArtifact = useArtifactStore((s) => s.removeArtifact);
   const currentThreadId = useChatStore((s) => s.currentThreadId);
@@ -333,7 +334,7 @@ const ArtifactsDialog: React.FC<ArtifactsDialogProps> = ({ open, onOpenChange })
       {/* Modal */}
       <div
         data-artifacts-modal
-        className="fixed left-16 top-0 bottom-0 z-[9999] w-[420px] bg-[#0a0a0a] border-r border-white/[0.08] flex flex-col shadow-2xl"
+        className="fixed left-20 top-0 bottom-0 z-[9999] w-[420px] bg-[#0a0a0a] border-r border-white/[0.08] flex flex-col shadow-2xl"
       >
         {/* Header */}
         <header className="flex items-center justify-between border-b border-white/[0.08] px-6 py-4 flex-shrink-0">

@@ -23,7 +23,18 @@ function getHeaders(token?: string): Record<string, string> {
 }
 
 async function json<T>(res: Response): Promise<T> {
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    const errorMessage = `HTTP ${res.status}`;
+    try {
+      const errorData = await res.json().catch(() => null);
+      if (errorData && typeof errorData === 'object' && 'error' in errorData) {
+        throw new Error(String(errorData.error));
+      }
+    } catch {
+      // If parsing fails, use status code
+    }
+    throw new Error(errorMessage);
+  }
   return (await res.json()) as T;
 }
 
@@ -89,7 +100,7 @@ log.debug('gateway typed');
 
 export async function streamChat(payload:{
   threadId:string; messages:{role:string;content:string}[]; provider?:string; model?:string;
-}, token?: string){
+}, token?: string, signal?: AbortSignal){
   try {
     const url = `${baseUrl}/v1/chat/stream`;
     const headers = getHeaders(token);
@@ -103,12 +114,18 @@ export async function streamChat(payload:{
     const resp = await fetch(url, {
       method:"POST",
       headers,
-      body: JSON.stringify(apiPayload)
+      body: JSON.stringify(apiPayload),
+      signal, // Add abort signal support
     });
     if(!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}: stream failed`);
     let firstAt:number|undefined;
     async function* chunks(){
       for await (const frame of readSSE(resp)){
+        // Check if aborted before processing frame
+        if (signal?.aborted) {
+          log.debug('[gateway.ts] Stream aborted');
+          break;
+        }
         const lines = frame.split("\n");
         const evLine = lines.find(l=>l.startsWith("event:"));
         const ev = evLine ? evLine.slice(6).trim() : "delta";
@@ -146,6 +163,11 @@ export async function streamChat(payload:{
     }
     return { firstAtGetter: ()=>firstAt, stream: chunks() };
   } catch (err) {
+    // Don't show error toast for aborted requests
+    if (err instanceof Error && err.name === 'AbortError') {
+      log.debug('[gateway.ts] Request aborted');
+      throw err;
+    }
     handleApiError(err, {
       action: 'starting chat stream',
       fallbackMessage: 'Stream connection failed.',

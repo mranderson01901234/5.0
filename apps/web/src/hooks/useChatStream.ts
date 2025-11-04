@@ -238,6 +238,17 @@ export function useChatStream(){
       // Declare variables outside try block for cleanup in finally
       let dotsInterval: NodeJS.Timeout | null = null;
       let imageGenerationPromise: Promise<void> | null = null;
+      const abortController = new AbortController();
+      const signal = abortController.signal;
+      
+      // Cleanup function
+      const cleanup = () => {
+        abortController.abort();
+        if (dotsInterval) {
+          clearInterval(dotsInterval);
+          dotsInterval = null;
+        }
+      };
       
       try {
       const token = await getToken();
@@ -250,6 +261,12 @@ export function useChatStream(){
         // Remove the trailing "..." from base message - we'll animate dots instead
         const messageWithoutDots = baseMessage.replace(/\.{3}\s*$/, '').trim();
         dotsInterval = setInterval(() => {
+          // Check if aborted
+          if (signal.aborted) {
+            clearInterval(dotsInterval!);
+            dotsInterval = null;
+            return;
+          }
           dotsFrame++;
           const dots = getAnimatedDots(dotsFrame);
           // Update message with animated dots
@@ -269,6 +286,7 @@ export function useChatStream(){
                 threadId: newThreadId,
                 prompt: text,
               }),
+              signal, // Add abort signal
             });
 
             if (!res.ok) {
@@ -285,6 +303,12 @@ export function useChatStream(){
             // Wait for image artifact to appear with images loaded
             log.info('[useChatStream] Waiting for image artifact to be ready', { artifactId });
             await waitForImageArtifact(artifactId, newThreadId, 30000);
+            
+            // Check if aborted during wait
+            if (signal.aborted) {
+              log.debug('[useChatStream] Image generation aborted');
+              return;
+            }
             
             // Clear dots animation
             if (dotsInterval) {
@@ -310,6 +334,11 @@ export function useChatStream(){
             
             log.info('[useChatStream] Image artifact ready');
           } catch (imageError) {
+            // Don't log abort errors
+            if (imageError instanceof Error && imageError.name === 'AbortError') {
+              log.debug('[useChatStream] Image generation aborted');
+              return;
+            }
             if (dotsInterval) {
               clearInterval(dotsInterval);
               dotsInterval = null;
@@ -325,12 +354,18 @@ export function useChatStream(){
       const currentState = useChatStore.getState();
       // Get messages from store - user message was already added on line 83, so don't concat it again
       const lastK = currentState.conversations.find(c => c.id === newThreadId)?.messages.slice(-10) || [];
-      const { firstAtGetter, stream } = await streamChat({ threadId: newThreadId, messages: lastK }, token || undefined);
+      const { firstAtGetter, stream } = await streamChat({ threadId: newThreadId, messages: lastK }, token || undefined, signal);
         let gotPrimary=false;
         let hasResearchSummary = false;
         let finalResponseText = ""; // Track final response for artifact detection
         
         for await (const {ev,data} of stream){
+          // Check if aborted
+          if (signal.aborted) {
+            log.debug('[useChatStream] Stream aborted');
+            break;
+          }
+          
           // Debug: log all events
           log.debug('[useChatStream] Stream event:', { ev, dataPreview: typeof data === 'string' ? data.substring(0, 50) : data });
 
@@ -690,12 +725,32 @@ export function useChatStream(){
           });
         }
       } catch (err: unknown) {
-        handleApiError(err, {
-          action: 'sending message',
-          fallbackMessage: 'Failed to send message.',
-        });
+        // Don't show error toast for aborted requests
+        if (err instanceof Error && err.name === 'AbortError') {
+          log.debug('[useChatStream] Request aborted');
+        } else {
+          handleApiError(err, {
+            action: 'sending message',
+            fallbackMessage: 'Failed to send message.',
+          });
+        }
       } finally {
-        // Clean up dots interval if still running
+        // Cleanup: abort all ongoing requests
+        cleanup();
+        
+        // Wait for image generation to complete if it's still running
+        if (imageGenerationPromise) {
+          try {
+            await Promise.race([
+              imageGenerationPromise,
+              new Promise((resolve) => setTimeout(resolve, 1000)), // 1s timeout
+            ]);
+          } catch {
+            // Ignore errors during cleanup
+          }
+        }
+        
+        // Clear dots interval if still running
         if (dotsInterval) {
           clearInterval(dotsInterval);
         }
