@@ -2,6 +2,7 @@ import Database from 'better-sqlite3';
 import { join, dirname } from 'path';
 import { mkdirSync } from 'fs';
 import { logger } from './log.js';
+import { initUnlimitedRecallSchema } from './unlimited-recall-db.js';
 
 let db: Database.Database | null = null;
 
@@ -375,6 +376,14 @@ export function getDatabase(): Database.Database {
       logger.info('✅ FTS5 full-text search enabled successfully');
     } catch (e: any) {
       logger.error({ error: e.message, stack: e.stack }, 'FTS5 setup failed - full-text search will be unavailable');
+    }
+
+    // Initialize unlimited recall schema
+    try {
+      initUnlimitedRecallSchema(db);
+      logger.info('✅ Unlimited recall system initialized successfully');
+    } catch (e: any) {
+      logger.error({ error: e.message, stack: e.stack }, 'Failed to initialize unlimited recall system');
     }
 
     logger.info('Database initialized');

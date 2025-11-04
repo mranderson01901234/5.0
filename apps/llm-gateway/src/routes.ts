@@ -8,6 +8,7 @@ import { metrics } from './metrics.js';
 import { logger } from './log.js';
 import { loadConfig } from './config.js';
 import { emitMessageEvent } from './memoryEmitter.js';
+import { captureMessageToUnlimitedRecall } from './unlimited-recall-capture.js';
 import { randomUUID } from 'crypto';
 import type { Message } from './types.js';
 import { PipelineOrchestrator } from './PipelineOrchestrator.js';
@@ -2167,6 +2168,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
               timestamp: now * 1000,
             };
             emitMessageEvent(userEvent).catch(() => {}); // Fire-and-forget
+            captureMessageToUnlimitedRecall(userEvent).catch(() => {}); // Unlimited recall capture
           }
 
           // Emit assistant response
@@ -2184,6 +2186,7 @@ export async function registerRoutes(app: FastifyInstance): Promise<void> {
               timestamp: Date.now(),
             };
             emitMessageEvent(assistantEvent).catch(() => {}); // Fire-and-forget
+            captureMessageToUnlimitedRecall(assistantEvent).catch(() => {}); // Unlimited recall capture
           }
         }
 
