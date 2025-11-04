@@ -10,3 +10,26 @@ dist/
 apps/llm-gateway/config/google-service-account.json
 google-chrome-stable.deb
 *.deb
+
+# Logs (added by safe cleanup script)
+logs/*.log
+*.log
+qdrant_storage/**/*.log
+
+# PID files
+*.pid
+*.pids
+
+# Backup files
+.env.backup
+.env.*.backup
+*.bak
+*.backup
+
+# Local configs
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# Compiled test files
+dist/**/*.test.*
+dist/**/*.spec.*
